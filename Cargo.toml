@@ -3,6 +3,10 @@ name = "apiman"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+name = "apiman"
+path = "src/lib.rs"
+
 [[bin]]
 name = "apiman"
 path = "src/main.rs"
