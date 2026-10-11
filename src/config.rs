@@ -34,6 +34,11 @@ pub fn default_config_dir() -> PathBuf {
 }
 
 pub fn default_socket_path() -> PathBuf {
+    if let Ok(sock) = std::env::var("APIMAN_SOCKET") {
+        if !sock.trim().is_empty() {
+            return PathBuf::from(sock);
+        }
+    }
     if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
         let p = PathBuf::from(runtime_dir).join("apiman.sock");
         if let Some(parent) = p.parent() {
@@ -60,15 +65,22 @@ impl Config {
         default_config_dir().join("config.json")
     }
 
-    pub fn load_or_default() -> Self {
-        let path = Self::config_file_path();
+    pub fn load_from(path: &Path) -> Option<Self> {
         if path.exists() {
-            if let Ok(content) = fs::read_to_string(&path) {
+            if let Ok(content) = fs::read_to_string(path) {
                 if let Ok(mut cfg) = serde_json::from_str::<Config>(&content) {
                     cfg.vault_path = expand_path(&cfg.vault_path);
-                    return cfg;
+                    return Some(cfg);
                 }
             }
+        }
+        None
+    }
+
+    pub fn load_or_default() -> Self {
+        let path = Self::config_file_path();
+        if let Some(cfg) = Self::load_from(&path) {
+            return cfg;
         }
 
         let cfg = Config::default();
@@ -76,14 +88,18 @@ impl Config {
         cfg
     }
 
-    pub fn save(&self) -> Result<(), std::io::Error> {
-        let dir = default_config_dir();
-        if !dir.exists() {
-            fs::create_dir_all(&dir)?;
+    pub fn save_to(&self, path: &Path) -> Result<(), std::io::Error> {
+        if let Some(parent) = path.parent() {
+            if !parent.exists() {
+                fs::create_dir_all(parent)?;
+            }
         }
-        let path = Self::config_file_path();
         let data = serde_json::to_string_pretty(self)?;
         fs::write(path, data)?;
         Ok(())
+    }
+
+    pub fn save(&self) -> Result<(), std::io::Error> {
+        self.save_to(&Self::config_file_path())
     }
 }

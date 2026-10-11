@@ -137,12 +137,25 @@ Prompts for a new master password, derives a new Argon2id key with fresh salt, r
 apiman delete STRIPE_SECRET_KEY --project billing
 ```
 
-#### Session Management
+#### Session Management & Auto-Lock Timeout
 ```bash
 apiman status   # Check daemon lock status, remaining timeout, and installation
 apiman unlock   # Start background session daemon
 apiman lock     # Lock vault and wipe master key from memory immediately
 ```
+
+Configure how long the session stays unlocked (supports `s`/`m`/`h`/`d` suffixes, or `none` to disable auto-lock):
+
+```bash
+apiman timeout          # Show current configured + active session timeout
+apiman timeout 30m      # Auto-lock after 30 minutes of inactivity
+apiman timeout 2h       # Auto-lock after 2 hours
+apiman timeout 900      # Auto-lock after 900 seconds
+apiman timeout none     # Always unlocked, never auto-lock
+```
+
+Setting `none` (stored as `0`) keeps the master key in the daemon indefinitely until `apiman lock`.
+You can also edit `auto_lock_timeout_seconds` directly in `config.json` (`0` = always unlocked).
 
 ## Configuration
 

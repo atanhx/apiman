@@ -7,7 +7,7 @@ use zeroize::{Zeroize, Zeroizing};
 use crate::config::{default_socket_path, Config};
 use crate::daemon::{
     check_daemon_status, get_cached_master_key, lock_daemon, run_daemon_loop, spawn_daemon,
-    update_daemon_master_key,
+    update_daemon_master_key, update_daemon_timeout,
 };
 use crate::install::{
     default_install_dir, installed_binary_path, is_installed, install_binary, uninstall_binary,
@@ -47,6 +47,10 @@ EXAMPLES:
 
   # Change the master vault password
   apiman passwd
+
+  # Set auto-lock timeout to 30 minutes, or disable it (always unlocked)
+  apiman timeout 30m
+  apiman timeout none
 
   # Install apiman binary to ~/.local/bin/
   apiman install
@@ -107,6 +111,12 @@ pub enum Commands {
         after_help = "EXAMPLE:\n  apiman passwd\n  # Re-encrypts the vault with a new Argon2id key and updates active session"
     )]
     Passwd,
+
+    #[command(
+        about = "Configure or view auto-lock session timeout (e.g. 15m, 2h, 0, or none)",
+        after_help = "EXAMPLES:\n  apiman timeout\n  apiman timeout 30m\n  apiman timeout 2h\n  apiman timeout 900s\n  apiman timeout none    # Keep always unlocked (disable auto-lock)"
+    )]
+    Timeout(TimeoutArgs),
 
     #[command(
         about = "Install apiman binary to ~/.local/bin",
@@ -222,6 +232,14 @@ pub struct RunArgs {
         help = "Executable program and arguments to run (e.g. -- node server.js)"
     )]
     pub command: Vec<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct TimeoutArgs {
+    #[arg(
+        help = "Timeout duration (e.g. 15m, 1h, 900s, 0, none, never). If omitted, displays current timeout"
+    )]
+    pub duration: Option<String>,
 }
 
 #[derive(Args, Debug)]
@@ -344,6 +362,7 @@ pub fn handle_cli(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         Commands::Delete(args) => handle_delete(custom_cfg, custom_vault, args),
         Commands::Run(args) => handle_run(custom_cfg, custom_vault, args),
         Commands::Passwd => handle_passwd(custom_cfg, custom_vault),
+        Commands::Timeout(args) => handle_timeout(custom_cfg, args),
         Commands::Install => handle_install(),
         Commands::Uninstall => handle_uninstall(),
         Commands::Lock => handle_lock(custom_cfg),
@@ -646,6 +665,91 @@ fn handle_passwd(
     Ok(ExitCode::SUCCESS)
 }
 
+fn handle_timeout(
+    custom_cfg: Option<&Path>,
+    args: TimeoutArgs,
+) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    let cfg_path = custom_cfg
+        .map(PathBuf::from)
+        .unwrap_or_else(Config::config_file_path);
+    let mut config =
+        Config::load_from(&cfg_path).unwrap_or_else(|| Config::load_or_default());
+    let socket_path = default_socket_path();
+
+    if let Some(dur_str) = args.duration {
+        let secs = parse_timeout_arg(&dur_str)?;
+        config.auto_lock_timeout_seconds = secs;
+        config.save_to(&cfg_path)?;
+
+        let _ = update_daemon_timeout(&socket_path, secs);
+
+        if secs == 0 {
+            eprintln!("Auto-lock timeout disabled. Session will remain always unlocked.");
+        } else {
+            eprintln!("Auto-lock timeout set to {}", format_duration_friendly(secs));
+        }
+    } else {
+        println!("Configured Timeout: {}", format_duration_friendly(config.auto_lock_timeout_seconds));
+        if let Some((unlocked, remaining, current_timeout)) = check_daemon_status(&socket_path) {
+            if current_timeout == 0 {
+                println!("Active Session:     Unlocked (Always Unlocked)");
+            } else if unlocked {
+                println!("Active Session:     Unlocked ({}s remaining until lock)", remaining);
+            } else {
+                println!("Active Session:     Locked");
+            }
+        }
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+pub fn parse_timeout_arg(input: &str) -> Result<u64, String> {
+    let lower = input.trim().to_lowercase();
+    if matches!(
+        lower.as_str(),
+        "none" | "never" | "off" | "inf" | "infinite" | "0" | "disable" | "disabled"
+    ) {
+        return Ok(0);
+    }
+
+    if let Some(num_str) = lower.strip_suffix('s') {
+        num_str
+            .parse::<u64>()
+            .map_err(|_| format!("Invalid seconds format '{input}'"))
+    } else if let Some(num_str) = lower.strip_suffix('m') {
+        let mins = num_str
+            .parse::<u64>()
+            .map_err(|_| format!("Invalid minutes format '{input}'"))?;
+        Ok(mins * 60)
+    } else if let Some(num_str) = lower.strip_suffix('h') {
+        let hours = num_str
+            .parse::<u64>()
+            .map_err(|_| format!("Invalid hours format '{input}'"))?;
+        Ok(hours * 3600)
+    } else if let Some(num_str) = lower.strip_suffix('d') {
+        let days = num_str
+            .parse::<u64>()
+            .map_err(|_| format!("Invalid days format '{input}'"))?;
+        Ok(days * 86400)
+    } else {
+        lower.parse::<u64>().map_err(|_| {
+            format!("Invalid duration '{input}'. Use e.g. '15m', '2h', '900s', '0', or 'none'.")
+        })
+    }
+}
+
+pub fn format_duration_friendly(secs: u64) -> String {
+    if secs == 0 {
+        "Disabled (Always Unlocked)".to_string()
+    } else if secs % 3600 == 0 {
+        format!("{}h ({}s)", secs / 3600, secs)
+    } else if secs % 60 == 0 {
+        format!("{}m ({}s)", secs / 60, secs)
+    } else {
+        format!("{}s", secs)
+    }
+}
+
 fn handle_install() -> Result<ExitCode, Box<dyn std::error::Error>> {
     let (target, in_path) = install_binary()?;
     eprintln!("Installed apiman binary to '{}'", target.display());
@@ -705,7 +809,11 @@ fn handle_status(
     if let Some((unlocked, remaining, timeout)) = check_daemon_status(&socket_path) {
         println!("Daemon:       Active (PID session)");
         println!("State:        {}", if unlocked { "Unlocked" } else { "Locked" });
-        println!("Auto-Lock:    {}s / {}s timeout", remaining, timeout);
+        if timeout == 0 {
+            println!("Auto-Lock:    Disabled (Always Unlocked)");
+        } else {
+            println!("Auto-Lock:    {}s / {}s timeout", remaining, timeout);
+        }
     } else {
         println!("Daemon:       Inactive (Locked)");
     }

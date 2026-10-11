@@ -6,7 +6,7 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use zeroize::{Zeroize, Zeroizing};
@@ -15,6 +15,7 @@ use zeroize::{Zeroize, Zeroizing};
 pub enum DaemonRequest {
     GetMasterKey,
     UpdateMasterKey(String),
+    UpdateTimeout(u64),
     Lock,
     Status,
     Ping,
@@ -125,6 +126,14 @@ pub fn update_daemon_master_key(socket_path: &Path, new_key: &[u8; 32]) -> Resul
     Ok(())
 }
 
+pub fn update_daemon_timeout(socket_path: &Path, new_timeout: u64) -> Result<(), DaemonClientError> {
+    if !socket_path.exists() {
+        return Ok(());
+    }
+    let _ = send_request(socket_path, &DaemonRequest::UpdateTimeout(new_timeout));
+    Ok(())
+}
+
 pub fn check_daemon_status(
     socket_path: &Path,
 ) -> Option<(bool, u64, u64)> {
@@ -209,6 +218,7 @@ pub fn run_daemon_loop(timeout_secs: u64, socket_path: PathBuf) -> Result<(), st
 
     listener.set_nonblocking(true)?;
 
+    let timeout_holder = Arc::new(AtomicU64::new(timeout_secs));
     let last_accessed = Arc::new(Mutex::new(Instant::now()));
     let should_stop = Arc::new(AtomicBool::new(false));
 
@@ -216,17 +226,22 @@ pub fn run_daemon_loop(timeout_secs: u64, socket_path: PathBuf) -> Result<(), st
     let watcher_stop = Arc::clone(&should_stop);
     let watcher_accessed = Arc::clone(&last_accessed);
     let watcher_key = Arc::clone(&master_key);
+    let watcher_timeout = Arc::clone(&timeout_holder);
     let watcher_socket = socket_path.clone();
 
     std::thread::spawn(move || {
-        let timeout = Duration::from_secs(timeout_secs);
         while !watcher_stop.load(Ordering::SeqCst) {
             std::thread::sleep(Duration::from_secs(1));
+            let current_timeout = watcher_timeout.load(Ordering::SeqCst);
+            if current_timeout == 0 {
+                // Timeout is 0 / None: always unlocked, never auto-lock
+                continue;
+            }
             let elapsed = {
                 let lock = watcher_accessed.lock().unwrap();
                 lock.elapsed()
             };
-            if elapsed >= timeout {
+            if elapsed >= Duration::from_secs(current_timeout) {
                 // Auto-lock
                 let mut key = watcher_key.lock().unwrap();
                 key.zeroize();
@@ -248,10 +263,11 @@ pub fn run_daemon_loop(timeout_secs: u64, socket_path: PathBuf) -> Result<(), st
                 let mk = Arc::clone(&master_key);
                 let stop = Arc::clone(&should_stop);
                 let accessed = Arc::clone(&last_accessed);
+                let t_holder = Arc::clone(&timeout_holder);
                 let sock_file = socket_path.clone();
 
                 std::thread::spawn(move || {
-                    let _ = handle_client(stream, mk, stop, accessed, timeout_secs, &sock_file);
+                    let _ = handle_client(stream, mk, stop, accessed, t_holder, &sock_file);
                 });
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -275,7 +291,7 @@ fn handle_client(
     master_key: Arc<Mutex<Zeroizing<[u8; 32]>>>,
     should_stop: Arc<AtomicBool>,
     last_accessed: Arc<Mutex<Instant>>,
-    timeout_secs: u64,
+    timeout_secs: Arc<AtomicU64>,
     socket_path: &Path,
 ) -> Result<(), std::io::Error> {
     stream.set_read_timeout(Some(Duration::from_secs(2)))?;
@@ -315,6 +331,12 @@ fn handle_client(
                 DaemonResponse::Error("Invalid key format".to_string())
             }
         }
+        DaemonRequest::UpdateTimeout(new_secs) => {
+            timeout_secs.store(new_secs, Ordering::SeqCst);
+            let mut lock = last_accessed.lock().unwrap();
+            *lock = Instant::now();
+            DaemonResponse::Pong
+        }
         DaemonRequest::Lock => {
             let mut key_guard = master_key.lock().unwrap();
             key_guard.zeroize();
@@ -323,15 +345,20 @@ fn handle_client(
             DaemonResponse::Locked
         }
         DaemonRequest::Status => {
+            let current_timeout = timeout_secs.load(Ordering::SeqCst);
             let elapsed = {
                 let lock = last_accessed.lock().unwrap();
                 lock.elapsed().as_secs()
             };
-            let remaining = timeout_secs.saturating_sub(elapsed);
+            let remaining = if current_timeout == 0 {
+                0
+            } else {
+                current_timeout.saturating_sub(elapsed)
+            };
             DaemonResponse::Status {
                 unlocked: !should_stop.load(Ordering::SeqCst),
                 remaining_seconds: remaining,
-                auto_lock_timeout: timeout_secs,
+                auto_lock_timeout: current_timeout,
             }
         }
     };

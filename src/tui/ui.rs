@@ -73,7 +73,11 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
         ),
         Span::styled(" | State: ", Style::default().fg(Color::White)),
         Span::styled(
-            "Unlocked",
+            if app.ctx.config.auto_lock_timeout_seconds == 0 {
+                "Unlocked (Always)"
+            } else {
+                "Unlocked"
+            },
             Style::default()
                 .fg(ACCENT_AMBER)
                 .add_modifier(Modifier::BOLD),
