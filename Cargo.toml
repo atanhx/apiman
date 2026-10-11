@@ -1,7 +1,12 @@
 [package]
 name = "apiman"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
+description = "Secure, minimal API credential manager with a TUI, process runner and local auth proxy"
+license = "MIT"
+repository = "https://github.com/atanhx/apiman"
+readme = "README.md"
+rust-version = "1.88"
 
 [lib]
 name = "apiman"
@@ -27,3 +32,12 @@ arboard = "3.4"
 libc = "0.2"
 tempfile = "3.17"
 uuid = { version = "1.13", features = ["v4"] }
+clap_complete = "4.5"
+tiny_http = "0.12"
+ureq = { version = "2.12", default-features = false, features = ["tls"] }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
