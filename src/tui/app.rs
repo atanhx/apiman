@@ -1,7 +1,7 @@
 use crate::cli::SessionContext;
+use crate::clipboard::copy_to_clipboard;
 use crate::security::SecretString;
 use crate::vault::SecretEntry;
-use arboard::Clipboard;
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
@@ -150,19 +150,14 @@ impl App {
 
     pub fn copy_selected_secret(&mut self) {
         if let Some(entry) = self.selected_entry() {
-            let secret_val = entry.value.expose_secret().to_string();
+            let secret_val = entry.value.expose_secret();
             let name = entry.name.clone();
-            match Clipboard::new() {
-                Ok(mut clipboard) => match clipboard.set_text(secret_val) {
-                    Ok(_) => {
-                        self.set_status(format!("Copied '{name}' to clipboard"));
-                    }
-                    Err(e) => {
-                        self.set_status(format!("Clipboard copy error: {e}"));
-                    }
-                },
+            match copy_to_clipboard(secret_val) {
+                Ok(_) => {
+                    self.set_status(format!("Copied '{name}' to clipboard"));
+                }
                 Err(e) => {
-                    self.set_status(format!("Clipboard unavailable: {e}"));
+                    self.set_status(format!("Copy failed: {e}"));
                 }
             }
         }

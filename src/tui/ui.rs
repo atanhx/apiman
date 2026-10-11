@@ -37,20 +37,46 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
     let filtered_count = app.filtered_indices.len();
 
     let header_text = vec![Line::from(vec![
-        Span::styled(" APIMAN ", Style::default().fg(Color::Black).bg(Color::Cyan).add_modifier(Modifier::BOLD)),
-        Span::raw("  Vault: "),
-        Span::styled(app.ctx.vault_path.display().to_string(), Style::default().fg(Color::Yellow)),
-        Span::raw(" | Scope: "),
-        Span::styled(format!("[{proj_label}]"), Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-        Span::raw(" | Entries: "),
-        Span::styled(format!("{filtered_count}/{total_count}"), Style::default().fg(Color::White)),
-        Span::raw(" | State: "),
-        Span::styled("Unlocked", Style::default().fg(Color::Green)),
+        Span::styled(
+            " APIMAN ",
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled("  Vault: ", Style::default().fg(Color::White)),
+        Span::styled(
+            app.ctx.vault_path.display().to_string(),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" | Scope: ", Style::default().fg(Color::White)),
+        Span::styled(
+            format!("[{proj_label}]"),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" | Entries: ", Style::default().fg(Color::White)),
+        Span::styled(
+            format!("{filtered_count}/{total_count}"),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" | State: ", Style::default().fg(Color::White)),
+        Span::styled(
+            "Unlocked",
+            Style::default()
+                .fg(Color::LightGreen)
+                .add_modifier(Modifier::BOLD),
+        ),
     ])];
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::DarkGray));
+        .border_style(Style::default().fg(Color::Rgb(120, 140, 160)));
 
     let paragraph = Paragraph::new(header_text).block(block);
     frame.render_widget(paragraph, area);
@@ -59,7 +85,14 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
 fn render_table(frame: &mut Frame, app: &App, area: Rect) {
     let header_cells = ["NAME", "PROJECT", "SECRET VALUE", "TAGS", "DESCRIPTION"]
         .iter()
-        .map(|h| Span::styled(*h, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)));
+        .map(|h| {
+            Span::styled(
+                *h,
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )
+        });
     let header = Row::new(header_cells).height(1).bottom_margin(1);
 
     let rows: Vec<Row> = app
@@ -81,13 +114,13 @@ fn render_table(frame: &mut Frame, app: &App, area: Rect) {
             let tags_str = if entry.tags.is_empty() {
                 "-".to_string()
             } else {
-                entry.tags.join(",")
+                entry.tags.join(", ")
             };
             let desc_str = entry.description.as_deref().unwrap_or("-");
 
             let style = if is_selected {
                 Style::default()
-                    .bg(Color::Rgb(30, 45, 60))
+                    .bg(Color::Rgb(35, 55, 80))
                     .fg(Color::White)
                     .add_modifier(Modifier::BOLD)
             } else {
@@ -101,25 +134,38 @@ fn render_table(frame: &mut Frame, app: &App, area: Rect) {
             };
 
             let cells = vec![
-                Span::styled(name_cell, style),
+                Span::styled(
+                    name_cell,
+                    if is_selected {
+                        Style::default()
+                            .fg(Color::White)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Color::White)
+                    },
+                ),
                 Span::styled(
                     proj_str,
                     if entry.is_global() {
-                        Style::default().fg(Color::DarkGray)
+                        Style::default().fg(Color::White)
                     } else {
-                        Style::default().fg(Color::Yellow)
+                        Style::default()
+                            .fg(Color::Yellow)
+                            .add_modifier(Modifier::BOLD)
                     },
                 ),
                 Span::styled(
                     val_str,
                     if is_revealed {
-                        Style::default().fg(Color::LightGreen)
+                        Style::default()
+                            .fg(Color::LightGreen)
+                            .add_modifier(Modifier::BOLD)
                     } else {
-                        Style::default().fg(Color::DarkGray)
+                        Style::default().fg(Color::White)
                     },
                 ),
                 Span::styled(tags_str, Style::default().fg(Color::Cyan)),
-                Span::styled(desc_str, Style::default().fg(Color::Gray)),
+                Span::styled(desc_str, Style::default().fg(Color::White)),
             ];
 
             Row::new(cells).style(style)
@@ -136,8 +182,13 @@ fn render_table(frame: &mut Frame, app: &App, area: Rect) {
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::DarkGray))
-        .title(" Secrets Catalog ");
+        .border_style(Style::default().fg(Color::Rgb(120, 140, 160)))
+        .title(Span::styled(
+            " Secrets Catalog ",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ));
 
     let table = Table::new(rows, widths).header(header).block(block);
     frame.render_widget(table, area);
@@ -146,52 +197,135 @@ fn render_table(frame: &mut Frame, app: &App, area: Rect) {
 fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
     let content = if app.active_modal == ActiveModal::Search {
         Line::from(vec![
-            Span::styled(" SEARCH: ", Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                " SEARCH: ",
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw(" "),
-            Span::styled(&app.search_query, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                &app.search_query,
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::styled("█", Style::default().fg(Color::Yellow)),
-            Span::styled("  [Enter] Confirm | [Esc] Clear", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                "  [Enter] Confirm | [Esc] Clear",
+                Style::default().fg(Color::White),
+            ),
         ])
     } else if let Some(toast) = app.status_text() {
         Line::from(vec![
-            Span::styled(" INFO: ", Style::default().fg(Color::Black).bg(Color::Green).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                " INFO: ",
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::LightGreen)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw(" "),
-            Span::styled(toast, Style::default().fg(Color::LightGreen)),
+            Span::styled(
+                toast,
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
         ])
     } else if !app.search_query.is_empty() {
         Line::from(vec![
-            Span::styled(format!(" Filter: '{}' (Press Esc to clear) ", app.search_query), Style::default().fg(Color::Yellow)),
+            Span::styled(
+                format!(" Filter: '{}' (Esc to clear) ", app.search_query),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw(" | "),
-            Span::styled("[Ctrl+K] Help | [c] Copy | [Space] Reveal | [a] Add | [e] Edit | [d] Delete | [q] Quit", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                "[Ctrl+K] Help | [c] Copy | [Space] Reveal | [a] Add | [e] Edit | [d] Delete | [q] Quit",
+                Style::default().fg(Color::White),
+            ),
         ])
     } else {
         Line::from(vec![
-            Span::styled("[Ctrl+K]", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-            Span::raw(" Help "),
-            Span::styled("[Ctrl+F]", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-            Span::raw(" Search "),
-            Span::styled("[c]", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-            Span::raw(" Copy "),
-            Span::styled("[Space]", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-            Span::raw(" Reveal "),
-            Span::styled("[a]", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-            Span::raw(" Add "),
-            Span::styled("[e]", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-            Span::raw(" Edit "),
-            Span::styled("[d]", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-            Span::raw(" Del "),
-            Span::styled("[p]", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-            Span::raw(" Scope "),
-            Span::styled("[l]", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-            Span::raw(" Lock "),
-            Span::styled("[q]", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-            Span::raw(" Quit"),
+            Span::styled(
+                "[Ctrl+K]",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" Help ", Style::default().fg(Color::White)),
+            Span::styled(
+                "[Ctrl+F]",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" Search ", Style::default().fg(Color::White)),
+            Span::styled(
+                "[c]",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" Copy ", Style::default().fg(Color::White)),
+            Span::styled(
+                "[Space]",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" Reveal ", Style::default().fg(Color::White)),
+            Span::styled(
+                "[a]",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" Add ", Style::default().fg(Color::White)),
+            Span::styled(
+                "[e]",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" Edit ", Style::default().fg(Color::White)),
+            Span::styled(
+                "[d]",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" Del ", Style::default().fg(Color::White)),
+            Span::styled(
+                "[p]",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" Scope ", Style::default().fg(Color::White)),
+            Span::styled(
+                "[l]",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" Lock ", Style::default().fg(Color::White)),
+            Span::styled(
+                "[q]",
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" Quit", Style::default().fg(Color::White)),
         ])
     };
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::DarkGray));
+        .border_style(Style::default().fg(Color::Rgb(120, 140, 160)));
 
     let paragraph = Paragraph::new(content).block(block);
     frame.render_widget(paragraph, area);
@@ -202,34 +336,46 @@ fn render_help_modal(frame: &mut Frame) {
     frame.render_widget(Clear, area);
 
     let shortcuts = vec![
-        Line::from(vec![
-            Span::styled("Navigation & Search", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-        ]),
-        Line::from("  j / Down       Move selection down"),
-        Line::from("  k / Up         Move selection up"),
-        Line::from("  Ctrl+F or /    Filter/Search entries across names, tags, projects"),
-        Line::from("  p              Cycle project scope filter (All -> Global -> Projects)"),
-        Line::from("  Esc            Clear active search filter"),
+        Line::from(vec![Span::styled(
+            "Navigation & Search",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )]),
+        Line::from(Span::styled("  j / Down       Move selection down", Style::default().fg(Color::White))),
+        Line::from(Span::styled("  k / Up         Move selection up", Style::default().fg(Color::White))),
+        Line::from(Span::styled("  Ctrl+F or /    Filter/Search entries across names, tags, projects", Style::default().fg(Color::White))),
+        Line::from(Span::styled("  p              Cycle project scope filter (All -> Global -> Projects)", Style::default().fg(Color::White))),
+        Line::from(Span::styled("  Esc            Clear active search filter", Style::default().fg(Color::White))),
         Line::from(""),
-        Line::from(vec![
-            Span::styled("Secret Actions", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-        ]),
-        Line::from("  c              Copy selected secret value to clipboard"),
-        Line::from("  Space / v      Toggle masked (••••) vs plaintext reveal"),
-        Line::from("  a              Open Add Secret form modal"),
-        Line::from("  e              Edit selected secret details"),
-        Line::from("  d              Delete selected secret (with confirmation)"),
+        Line::from(vec![Span::styled(
+            "Secret Actions",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )]),
+        Line::from(Span::styled("  c              Copy selected secret value to clipboard", Style::default().fg(Color::White))),
+        Line::from(Span::styled("  Space / v      Toggle masked (••••) vs plaintext reveal", Style::default().fg(Color::White))),
+        Line::from(Span::styled("  a              Open Add Secret form modal", Style::default().fg(Color::White))),
+        Line::from(Span::styled("  e              Edit selected secret details", Style::default().fg(Color::White))),
+        Line::from(Span::styled("  d              Delete selected secret (with confirmation)", Style::default().fg(Color::White))),
         Line::from(""),
-        Line::from(vec![
-            Span::styled("Session Management", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-        ]),
-        Line::from("  l              Lock vault and terminate background daemon"),
-        Line::from("  Ctrl+K or ?    Show this help modal"),
-        Line::from("  q / Ctrl+C     Exit TUI (session remains unlocked until auto-lock)"),
+        Line::from(vec![Span::styled(
+            "Session Management",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )]),
+        Line::from(Span::styled("  l              Lock vault and terminate background daemon", Style::default().fg(Color::White))),
+        Line::from(Span::styled("  Ctrl+K or ?    Show this help modal", Style::default().fg(Color::White))),
+        Line::from(Span::styled("  q / Ctrl+C     Exit TUI (session remains unlocked until auto-lock)", Style::default().fg(Color::White))),
         Line::from(""),
-        Line::from(vec![
-            Span::styled("Press [Esc] or [Enter] to close help", Style::default().fg(Color::Yellow)),
-        ]),
+        Line::from(vec![Span::styled(
+            "Press [Esc] or [Enter] to close help",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )]),
     ];
 
     let block = Block::default()
@@ -243,7 +389,7 @@ fn render_help_modal(frame: &mut Frame) {
 }
 
 fn render_form_modal(frame: &mut Frame, app: &App) {
-    let area = centered_rect(65, 75, frame.area());
+    let area = centered_rect(68, 80, frame.area());
     frame.render_widget(Clear, area);
 
     let is_edit = matches!(app.active_modal, ActiveModal::Edit(_));
@@ -270,71 +416,177 @@ fn render_form_modal(frame: &mut Frame, app: &App) {
 
     // Field 0: Name
     let name_block = field_block(" Name (required) ", active == 0);
-    let name_widget = Paragraph::new(app.form_state.name.as_str()).block(name_block);
+    let name_text = if active == 0 {
+        format!("{}█", app.form_state.name)
+    } else {
+        app.form_state.name.clone()
+    };
+    let name_widget = Paragraph::new(name_text)
+        .style(
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        )
+        .block(name_block);
     frame.render_widget(name_widget, chunks[0]);
 
     // Field 1: Project
     let proj_block = field_block(" Project (blank for global) ", active == 1);
-    let proj_widget = Paragraph::new(app.form_state.project.as_str()).block(proj_block);
+    let proj_text = if active == 1 {
+        format!("{}█", app.form_state.project)
+    } else {
+        app.form_state.project.clone()
+    };
+    let proj_widget = Paragraph::new(proj_text)
+        .style(
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        )
+        .block(proj_block);
     frame.render_widget(proj_widget, chunks[1]);
 
     // Field 2: Value
     let val_label = if app.form_state.show_secret {
-        " Secret Value [Plaintext visible] "
+        " Secret Value [Plaintext visible - Ctrl+V to mask] "
     } else {
-        " Secret Value [Masked - press Ctrl+V to reveal] "
+        " Secret Value [Masked - Ctrl+V to reveal] "
     };
     let val_block = field_block(val_label, active == 2);
     let display_val = if app.form_state.show_secret {
-        app.form_state.value.clone()
+        if active == 2 {
+            format!("{}█", app.form_state.value)
+        } else {
+            app.form_state.value.clone()
+        }
     } else {
-        "*".repeat(app.form_state.value.len())
+        let stars = "*".repeat(app.form_state.value.len());
+        if active == 2 {
+            format!("{stars}█")
+        } else {
+            stars
+        }
     };
-    let val_widget = Paragraph::new(display_val).block(val_block);
+    let val_widget = Paragraph::new(display_val)
+        .style(
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        )
+        .block(val_block);
     frame.render_widget(val_widget, chunks[2]);
 
     // Field 3: Tags
     let tags_block = field_block(" Tags (comma separated) ", active == 3);
-    let tags_widget = Paragraph::new(app.form_state.tags.as_str()).block(tags_block);
+    let tags_text = if active == 3 {
+        format!("{}█", app.form_state.tags)
+    } else {
+        app.form_state.tags.clone()
+    };
+    let tags_widget = Paragraph::new(tags_text)
+        .style(
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        )
+        .block(tags_block);
     frame.render_widget(tags_widget, chunks[3]);
 
     // Field 4: Description
     let desc_block = field_block(" Description / Notes ", active == 4);
-    let desc_widget = Paragraph::new(app.form_state.description.as_str()).block(desc_block);
+    let desc_text = if active == 4 {
+        format!("{}█", app.form_state.description)
+    } else {
+        app.form_state.description.clone()
+    };
+    let desc_widget = Paragraph::new(desc_text)
+        .style(
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        )
+        .block(desc_block);
     frame.render_widget(desc_widget, chunks[4]);
 
     // Hints
     let hints = Line::from(vec![
-        Span::styled("[Tab/Down]", Style::default().fg(Color::Cyan)),
-        Span::raw(" Next | "),
-        Span::styled("[Shift+Tab/Up]", Style::default().fg(Color::Cyan)),
-        Span::raw(" Prev | "),
-        Span::styled("[Ctrl+S/Enter]", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-        Span::raw(" Save | "),
-        Span::styled("[Esc]", Style::default().fg(Color::Red)),
-        Span::raw(" Cancel"),
+        Span::styled(
+            "[Tab/Down]",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" Next | ", Style::default().fg(Color::White)),
+        Span::styled(
+            "[Shift+Tab/Up]",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" Prev | ", Style::default().fg(Color::White)),
+        Span::styled(
+            "[Ctrl+V]",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" Mask/Reveal | ", Style::default().fg(Color::White)),
+        Span::styled(
+            "[Ctrl+S/Enter]",
+            Style::default()
+                .fg(Color::LightGreen)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" Save | ", Style::default().fg(Color::White)),
+        Span::styled(
+            "[Esc]",
+            Style::default()
+                .fg(Color::Red)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" Cancel", Style::default().fg(Color::White)),
     ]);
-    frame.render_widget(Paragraph::new(hints).alignment(Alignment::Center), chunks[5]);
+    frame.render_widget(
+        Paragraph::new(hints).alignment(Alignment::Center),
+        chunks[5],
+    );
 
     let outer_block = Block::default()
-        .title(title)
+        .title(Span::styled(
+            title,
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ))
         .title_alignment(Alignment::Center)
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Green));
+        .border_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
     frame.render_widget(outer_block, area);
 }
 
 fn field_block(title: &'static str, is_active: bool) -> Block<'static> {
     if is_active {
         Block::default()
-            .title(title)
+            .title(Span::styled(
+                title,
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ))
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
+            .border_style(
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )
     } else {
         Block::default()
-            .title(title)
+            .title(Span::styled(
+                title,
+                Style::default().fg(Color::White),
+            ))
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::DarkGray))
+            .border_style(Style::default().fg(Color::Rgb(140, 150, 160)))
     }
 }
 
@@ -343,7 +595,12 @@ fn render_delete_modal(frame: &mut Frame, app: &App) {
     frame.render_widget(Clear, area);
 
     let name = if let ActiveModal::DeleteConfirm(real_idx) = app.active_modal {
-        app.ctx.vault.entries.get(real_idx).map(|e| e.name.as_str()).unwrap_or("")
+        app.ctx
+            .vault
+            .entries
+            .get(real_idx)
+            .map(|e| e.name.as_str())
+            .unwrap_or("")
     } else {
         ""
     };
@@ -351,20 +608,37 @@ fn render_delete_modal(frame: &mut Frame, app: &App) {
     let text = vec![
         Line::from(""),
         Line::from(vec![
-            Span::raw("Permanently delete secret '"),
-            Span::styled(name, Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-            Span::raw("' ?"),
+            Span::styled("Permanently delete secret '", Style::default().fg(Color::White)),
+            Span::styled(
+                name,
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("' ?", Style::default().fg(Color::White)),
         ]),
         Line::from(""),
         Line::from(vec![
-            Span::styled(" [y] Confirm Delete ", Style::default().fg(Color::White).bg(Color::Red).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                " [y] Confirm Delete ",
+                Style::default()
+                    .fg(Color::White)
+                    .bg(Color::Red)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Span::raw("   "),
-            Span::styled(" [n / Esc] Cancel ", Style::default().fg(Color::Black).bg(Color::White)),
+            Span::styled(
+                " [n / Esc] Cancel ",
+                Style::default().fg(Color::Black).bg(Color::White),
+            ),
         ]),
     ];
 
     let block = Block::default()
-        .title(" Confirm Deletion ")
+        .title(Span::styled(
+            " Confirm Deletion ",
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        ))
         .title_alignment(Alignment::Center)
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Red));

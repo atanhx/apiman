@@ -110,17 +110,33 @@ impl Vault {
         let normalized_name = name.trim();
         let target_project = target_project.map(str::trim).filter(|p| !p.is_empty() && *p != "global");
 
+        // 1. If explicit project specified, try to find in that project first
         if let Some(p) = target_project {
             if let Some(entry) = self.entries.iter().find(|e| {
-                e.name == normalized_name && e.project.as_deref() == Some(p)
+                e.name.eq_ignore_ascii_case(normalized_name)
+                    && e.project.as_deref().map(|s| s.eq_ignore_ascii_case(p)).unwrap_or(false)
             }) {
                 return Some(entry);
             }
         }
 
-        self.entries.iter().find(|e| {
-            e.name == normalized_name && e.is_global()
-        })
+        // 2. Try global entry (exact match first, then case-insensitive)
+        if let Some(entry) = self.entries.iter().find(|e| e.name == normalized_name && e.is_global()) {
+            return Some(entry);
+        }
+        if let Some(entry) = self.entries.iter().find(|e| e.name.eq_ignore_ascii_case(normalized_name) && e.is_global()) {
+            return Some(entry);
+        }
+
+        // 3. Search across all projects without needing --project flag
+        if let Some(entry) = self.entries.iter().find(|e| e.name == normalized_name) {
+            return Some(entry);
+        }
+        if let Some(entry) = self.entries.iter().find(|e| e.name.eq_ignore_ascii_case(normalized_name)) {
+            return Some(entry);
+        }
+
+        None
     }
 
     pub fn get_exact(&self, name: &str, project: Option<&str>) -> Option<&SecretEntry> {
