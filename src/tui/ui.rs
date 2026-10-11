@@ -33,6 +33,8 @@ pub fn render(frame: &mut Frame, app: &App) {
         ActiveModal::KeybindingsHelp => render_help_modal(frame),
         ActiveModal::Add | ActiveModal::Edit(_) => render_form_modal(frame, app),
         ActiveModal::DeleteConfirm(_) => render_delete_modal(frame, app),
+        ActiveModal::Import => render_import_modal(frame, app),
+        ActiveModal::Export => render_export_modal(frame, app),
         _ => {}
     }
 }
@@ -216,14 +218,13 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
             ),
             Span::raw(" "),
             Span::styled(
-                &app.search_query,
+                app.search_query.with_cursor_marker(false),
                 Style::default()
                     .fg(Color::White)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled("█", Style::default().fg(ACCENT_ORANGE)),
             Span::styled(
-                "  [Enter] Confirm | [Esc] Clear",
+                "  [Enter/Down] Done | [Up/Down] Move | [Esc] Clear",
                 Style::default().fg(Color::White),
             ),
         ])
@@ -244,10 +245,10 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
                     .add_modifier(Modifier::BOLD),
             ),
         ])
-    } else if !app.search_query.is_empty() {
+    } else if !app.search_query.text.is_empty() {
         Line::from(vec![
             Span::styled(
-                format!(" Filter: '{}' (Esc to clear) ", app.search_query),
+                format!(" Filter: '{}' (Esc to clear) ", app.search_query.text),
                 Style::default()
                     .fg(ACCENT_ORANGE)
                     .add_modifier(Modifier::BOLD),
@@ -310,6 +311,20 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
             ),
             Span::styled(" Del ", Style::default().fg(Color::White)),
             Span::styled(
+                "[i]",
+                Style::default()
+                    .fg(ACCENT_ORANGE)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" Import ", Style::default().fg(Color::White)),
+            Span::styled(
+                "[X]",
+                Style::default()
+                    .fg(ACCENT_ORANGE)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" Export ", Style::default().fg(Color::White)),
+            Span::styled(
                 "[p]",
                 Style::default()
                     .fg(ACCENT_ORANGE)
@@ -342,7 +357,7 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_help_modal(frame: &mut Frame) {
-    let area = centered_rect(62, 70, frame.area());
+    let area = centered_rect(64, 82, frame.area());
     frame.render_widget(Clear, area);
 
     let shortcuts = vec![
@@ -352,11 +367,12 @@ fn render_help_modal(frame: &mut Frame) {
                 .fg(ACCENT_ORANGE)
                 .add_modifier(Modifier::BOLD),
         )]),
-        Line::from(Span::styled("  j / Down       Move selection down", Style::default().fg(Color::White))),
-        Line::from(Span::styled("  k / Up         Move selection up", Style::default().fg(Color::White))),
-        Line::from(Span::styled("  Ctrl+F or /    Filter/Search entries across names, tags, projects", Style::default().fg(Color::White))),
-        Line::from(Span::styled("  p              Cycle project scope filter (All -> Global -> Projects)", Style::default().fg(Color::White))),
-        Line::from(Span::styled("  Esc            Clear active search filter", Style::default().fg(Color::White))),
+        Line::from(Span::styled("  Up / Down / j / k   Move selection (also PgUp/PgDn, Home/End)", Style::default().fg(Color::White))),
+        Line::from(Span::styled("  Left / Right        Cycle project scope filter", Style::default().fg(Color::White))),
+        Line::from(Span::styled("  Ctrl+F or /         Filter/Search entries across names, tags, projects", Style::default().fg(Color::White))),
+        Line::from(Span::styled("    (in search: Left/Right move cursor, Up/Down move selection)", Style::default().fg(Color::White))),
+        Line::from(Span::styled("  p                   Cycle project scope filter (All -> Global -> Projects)", Style::default().fg(Color::White))),
+        Line::from(Span::styled("  Esc                 Clear active search filter", Style::default().fg(Color::White))),
         Line::from(""),
         Line::from(vec![Span::styled(
             "Secret Actions",
@@ -364,11 +380,14 @@ fn render_help_modal(frame: &mut Frame) {
                 .fg(ACCENT_ORANGE)
                 .add_modifier(Modifier::BOLD),
         )]),
-        Line::from(Span::styled("  c              Copy selected secret value to clipboard", Style::default().fg(Color::White))),
-        Line::from(Span::styled("  Space / v      Toggle masked (••••) vs plaintext reveal", Style::default().fg(Color::White))),
-        Line::from(Span::styled("  a              Open Add Secret form modal", Style::default().fg(Color::White))),
-        Line::from(Span::styled("  e              Edit selected secret details", Style::default().fg(Color::White))),
-        Line::from(Span::styled("  d              Delete selected secret (with confirmation)", Style::default().fg(Color::White))),
+        Line::from(Span::styled("  c                   Copy selected secret value to clipboard", Style::default().fg(Color::White))),
+        Line::from(Span::styled("  Space / v           Toggle masked (••••) vs plaintext reveal", Style::default().fg(Color::White))),
+        Line::from(Span::styled("  a                   Open Add Secret form modal", Style::default().fg(Color::White))),
+        Line::from(Span::styled("  e                   Edit selected secret details", Style::default().fg(Color::White))),
+        Line::from(Span::styled("    (in forms: Tab/Up/Down switch fields, Left/Right/Home/End move cursor)", Style::default().fg(Color::White))),
+        Line::from(Span::styled("  d                   Delete selected secret (Left/Right + Enter to confirm)", Style::default().fg(Color::White))),
+        Line::from(Span::styled("  i                   Import secrets from a .env file", Style::default().fg(Color::White))),
+        Line::from(Span::styled("  X (Shift+X)         Export visible secrets to a .env file", Style::default().fg(Color::White))),
         Line::from(""),
         Line::from(vec![Span::styled(
             "Session & Password Management",
@@ -376,10 +395,11 @@ fn render_help_modal(frame: &mut Frame) {
                 .fg(ACCENT_ORANGE)
                 .add_modifier(Modifier::BOLD),
         )]),
-        Line::from(Span::styled("  l              Lock vault and terminate background daemon", Style::default().fg(Color::White))),
-        Line::from(Span::styled("  apiman passwd  Change master password (run from shell)", Style::default().fg(ACCENT_AMBER))),
-        Line::from(Span::styled("  Ctrl+K or ?    Show this help modal", Style::default().fg(Color::White))),
-        Line::from(Span::styled("  q / Ctrl+C     Exit TUI (session remains unlocked until auto-lock)", Style::default().fg(Color::White))),
+        Line::from(Span::styled("  l                   Lock vault and terminate background daemon", Style::default().fg(Color::White))),
+        Line::from(Span::styled("  apiman passwd       Change master password (run from shell)", Style::default().fg(ACCENT_AMBER))),
+        Line::from(Span::styled("  apiman timeout      Configure auto-lock timeout (run from shell)", Style::default().fg(ACCENT_AMBER))),
+        Line::from(Span::styled("  Ctrl+K or ?         Show this help modal", Style::default().fg(Color::White))),
+        Line::from(Span::styled("  q / Ctrl+C          Exit TUI (session remains unlocked until auto-lock)", Style::default().fg(Color::White))),
         Line::from(""),
         Line::from(vec![Span::styled(
             "Press [Esc] or [Enter] to close help",
@@ -428,9 +448,9 @@ fn render_form_modal(frame: &mut Frame, app: &App) {
     // Field 0: Name
     let name_block = field_block(" Name (required) ", active == 0);
     let name_text = if active == 0 {
-        format!("{}█", app.form_state.name)
+        app.form_state.name.with_cursor_marker(false)
     } else {
-        app.form_state.name.clone()
+        app.form_state.name.text.clone()
     };
     let name_widget = Paragraph::new(name_text)
         .style(
@@ -444,9 +464,9 @@ fn render_form_modal(frame: &mut Frame, app: &App) {
     // Field 1: Project
     let proj_block = field_block(" Project (blank for global) ", active == 1);
     let proj_text = if active == 1 {
-        format!("{}█", app.form_state.project)
+        app.form_state.project.with_cursor_marker(false)
     } else {
-        app.form_state.project.clone()
+        app.form_state.project.text.clone()
     };
     let proj_widget = Paragraph::new(proj_text)
         .style(
@@ -466,17 +486,14 @@ fn render_form_modal(frame: &mut Frame, app: &App) {
     let val_block = field_block(val_label, active == 2);
     let display_val = if app.form_state.show_secret {
         if active == 2 {
-            format!("{}█", app.form_state.value)
+            app.form_state.value.with_cursor_marker(false)
         } else {
-            app.form_state.value.clone()
+            app.form_state.value.text.clone()
         }
+    } else if active == 2 {
+        app.form_state.value.with_cursor_marker(true)
     } else {
-        let stars = "*".repeat(app.form_state.value.len());
-        if active == 2 {
-            format!("{stars}█")
-        } else {
-            stars
-        }
+        "*".repeat(app.form_state.value.text.chars().count())
     };
     let val_widget = Paragraph::new(display_val)
         .style(
@@ -490,9 +507,9 @@ fn render_form_modal(frame: &mut Frame, app: &App) {
     // Field 3: Tags
     let tags_block = field_block(" Tags (comma separated) ", active == 3);
     let tags_text = if active == 3 {
-        format!("{}█", app.form_state.tags)
+        app.form_state.tags.with_cursor_marker(false)
     } else {
-        app.form_state.tags.clone()
+        app.form_state.tags.text.clone()
     };
     let tags_widget = Paragraph::new(tags_text)
         .style(
@@ -506,9 +523,9 @@ fn render_form_modal(frame: &mut Frame, app: &App) {
     // Field 4: Description
     let desc_block = field_block(" Description / Notes ", active == 4);
     let desc_text = if active == 4 {
-        format!("{}█", app.form_state.description)
+        app.form_state.description.with_cursor_marker(false)
     } else {
-        app.form_state.description.clone()
+        app.form_state.description.text.clone()
     };
     let desc_widget = Paragraph::new(desc_text)
         .style(
@@ -522,33 +539,40 @@ fn render_form_modal(frame: &mut Frame, app: &App) {
     // Hints
     let hints = Line::from(vec![
         Span::styled(
-            "[Tab/Down]",
+            "[Tab]",
             Style::default()
                 .fg(ACCENT_ORANGE)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(" Next | ", Style::default().fg(Color::White)),
         Span::styled(
-            "[Shift+Tab/Up]",
+            "[Up/Down]",
             Style::default()
                 .fg(ACCENT_ORANGE)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(" Prev | ", Style::default().fg(Color::White)),
+        Span::styled(" Field | ", Style::default().fg(Color::White)),
+        Span::styled(
+            "[Left/Right]",
+            Style::default()
+                .fg(ACCENT_ORANGE)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" Cursor | ", Style::default().fg(Color::White)),
+        Span::styled(
+            "[Ctrl+S]",
+            Style::default()
+                .fg(ACCENT_ORANGE)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" Save | ", Style::default().fg(Color::White)),
         Span::styled(
             "[Ctrl+V]",
             Style::default()
                 .fg(ACCENT_AMBER)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(" Mask/Reveal | ", Style::default().fg(Color::White)),
-        Span::styled(
-            "[Ctrl+S/Enter]",
-            Style::default()
-                .fg(ACCENT_ORANGE)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" Save | ", Style::default().fg(Color::White)),
+        Span::styled(" Mask | ", Style::default().fg(Color::White)),
         Span::styled(
             "[Esc]",
             Style::default()
@@ -602,7 +626,7 @@ fn field_block(title: &'static str, is_active: bool) -> Block<'static> {
 }
 
 fn render_delete_modal(frame: &mut Frame, app: &App) {
-    let area = centered_rect(50, 25, frame.area());
+    let area = centered_rect(50, 30, frame.area());
     frame.render_widget(Clear, area);
 
     let name = if let ActiveModal::DeleteConfirm(real_idx) = app.active_modal {
@@ -614,6 +638,23 @@ fn render_delete_modal(frame: &mut Frame, app: &App) {
             .unwrap_or("")
     } else {
         ""
+    };
+
+    let confirm_style = if app.delete_choice_delete {
+        Style::default()
+            .fg(Color::White)
+            .bg(ACCENT_RED)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::White)
+    };
+    let cancel_style = if app.delete_choice_delete {
+        Style::default().fg(Color::Black).bg(Color::White)
+    } else {
+        Style::default()
+            .fg(Color::Black)
+            .bg(ACCENT_ORANGE)
+            .add_modifier(Modifier::BOLD)
     };
 
     let text = vec![
@@ -630,19 +671,15 @@ fn render_delete_modal(frame: &mut Frame, app: &App) {
         ]),
         Line::from(""),
         Line::from(vec![
-            Span::styled(
-                " [y] Confirm Delete ",
-                Style::default()
-                    .fg(Color::White)
-                    .bg(ACCENT_RED)
-                    .add_modifier(Modifier::BOLD),
-            ),
+            Span::styled(" [y] Delete ", confirm_style),
             Span::raw("   "),
-            Span::styled(
-                " [n / Esc] Cancel ",
-                Style::default().fg(Color::Black).bg(Color::White),
-            ),
+            Span::styled(" [n] Cancel ", cancel_style),
         ]),
+        Line::from(""),
+        Line::from(vec![Span::styled(
+            "[Left/Right] Choose | [Enter] Confirm | [Esc] Cancel",
+            Style::default().fg(Color::White),
+        )]),
     ];
 
     let block = Block::default()
@@ -656,6 +693,156 @@ fn render_delete_modal(frame: &mut Frame, app: &App) {
 
     let paragraph = Paragraph::new(text).alignment(Alignment::Center).block(block);
     frame.render_widget(paragraph, area);
+}
+
+fn render_import_modal(frame: &mut Frame, app: &App) {
+    let area = centered_rect(62, 34, frame.area());
+    frame.render_widget(Clear, area);
+
+    let active = app.path_form.active_field;
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .margin(1)
+        .constraints([
+            Constraint::Length(3), // Path
+            Constraint::Length(3), // Project
+            Constraint::Length(2), // Hint
+        ])
+        .split(area);
+
+    let path_text = if active == 0 {
+        app.path_form.path.with_cursor_marker(false)
+    } else {
+        app.path_form.path.text.clone()
+    };
+    let path_widget = Paragraph::new(path_text)
+        .style(
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        )
+        .block(field_block(" .env file path ", active == 0));
+    frame.render_widget(path_widget, chunks[0]);
+
+    let proj_text = if active == 1 {
+        app.path_form.project.with_cursor_marker(false)
+    } else {
+        app.path_form.project.text.clone()
+    };
+    let proj_widget = Paragraph::new(proj_text)
+        .style(
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        )
+        .block(field_block(" Project (blank for global) ", active == 1));
+    frame.render_widget(proj_widget, chunks[1]);
+
+    let hints = Line::from(vec![
+        Span::styled("[Tab]", Style::default().fg(ACCENT_ORANGE).add_modifier(Modifier::BOLD)),
+        Span::styled(" Next | ", Style::default().fg(Color::White)),
+        Span::styled("[Left/Right]", Style::default().fg(ACCENT_ORANGE).add_modifier(Modifier::BOLD)),
+        Span::styled(" Cursor | ", Style::default().fg(Color::White)),
+        Span::styled("[Enter]", Style::default().fg(ACCENT_ORANGE).add_modifier(Modifier::BOLD)),
+        Span::styled(" Import | ", Style::default().fg(Color::White)),
+        Span::styled("[Esc]", Style::default().fg(ACCENT_RED).add_modifier(Modifier::BOLD)),
+        Span::styled(" Cancel", Style::default().fg(Color::White)),
+    ]);
+    frame.render_widget(
+        Paragraph::new(hints).alignment(Alignment::Center),
+        chunks[2],
+    );
+
+    let outer_block = Block::default()
+        .title(Span::styled(
+            " Import .env File ",
+            Style::default()
+                .fg(ACCENT_ORANGE)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .title_alignment(Alignment::Center)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(ACCENT_ORANGE).add_modifier(Modifier::BOLD));
+    frame.render_widget(outer_block, area);
+}
+
+fn render_export_modal(frame: &mut Frame, app: &App) {
+    let area = centered_rect(62, 34, frame.area());
+    frame.render_widget(Clear, area);
+
+    let active = app.path_form.active_field;
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .margin(1)
+        .constraints([
+            Constraint::Length(3), // Path
+            Constraint::Length(3), // Format
+            Constraint::Length(2), // Hint
+        ])
+        .split(area);
+
+    let path_text = if active == 0 {
+        app.path_form.path.with_cursor_marker(false)
+    } else {
+        app.path_form.path.text.clone()
+    };
+    let path_widget = Paragraph::new(path_text)
+        .style(
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        )
+        .block(field_block(" Output file path ", active == 0));
+    frame.render_widget(path_widget, chunks[0]);
+
+    let format_label = if app.path_form.export_example {
+        " .env.example (keys only, safe) "
+    } else {
+        " .env (keys + values) "
+    };
+    let format_text = if active == 1 {
+        format!("< {} >", format_label.trim())
+    } else {
+        format_label.trim().to_string()
+    };
+    let format_widget = Paragraph::new(format_text)
+        .style(
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        )
+        .alignment(Alignment::Center)
+        .block(field_block(" Format [Left/Right to switch] ", active == 1));
+    frame.render_widget(format_widget, chunks[1]);
+
+    let hints = Line::from(vec![
+        Span::styled("[Tab]", Style::default().fg(ACCENT_ORANGE).add_modifier(Modifier::BOLD)),
+        Span::styled(" Next | ", Style::default().fg(Color::White)),
+        Span::styled("[Space]", Style::default().fg(ACCENT_ORANGE).add_modifier(Modifier::BOLD)),
+        Span::styled(" Toggle | ", Style::default().fg(Color::White)),
+        Span::styled("[Enter]", Style::default().fg(ACCENT_ORANGE).add_modifier(Modifier::BOLD)),
+        Span::styled(" Export | ", Style::default().fg(Color::White)),
+        Span::styled("[Esc]", Style::default().fg(ACCENT_RED).add_modifier(Modifier::BOLD)),
+        Span::styled(" Cancel", Style::default().fg(Color::White)),
+    ]);
+    frame.render_widget(
+        Paragraph::new(hints).alignment(Alignment::Center),
+        chunks[2],
+    );
+
+    let outer_block = Block::default()
+        .title(Span::styled(
+            " Export Visible Secrets ",
+            Style::default()
+                .fg(ACCENT_ORANGE)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .title_alignment(Alignment::Center)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(ACCENT_ORANGE).add_modifier(Modifier::BOLD));
+    frame.render_widget(outer_block, area);
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, r: Rect) -> Rect {

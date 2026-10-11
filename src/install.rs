@@ -30,18 +30,32 @@ pub fn is_dir_in_path(dir: &Path) -> bool {
     false
 }
 
-pub fn install_binary() -> Result<(PathBuf, bool), String> {
+pub fn resolve_install_dir(custom: Option<&Path>) -> Result<PathBuf, String> {
+    if let Some(dir) = custom {
+        if dir.exists() && !dir.is_dir() {
+            return Err(format!(
+                "Install path '{}' exists and is not a directory.",
+                dir.display()
+            ));
+        }
+        return Ok(dir.to_path_buf());
+    }
+    Ok(default_install_dir())
+}
+
+pub fn install_binary_to(target_dir: &Path) -> Result<(PathBuf, bool), String> {
     let current_exe = std::env::current_exe().map_err(|e| format!("Cannot locate current binary: {e}"))?;
-    let target_dir = default_install_dir();
     let target_path = target_dir.join("apiman");
 
     if !target_dir.exists() {
-        fs::create_dir_all(&target_dir)
+        fs::create_dir_all(target_dir)
             .map_err(|e| format!("Failed to create directory '{}': {e}", target_dir.display()))?;
     }
 
-    if target_path.exists() {
-        let _ = fs::remove_file(&target_path);
+    // Force install: remove any existing binary first.
+    if target_path.exists() || target_path.is_symlink() {
+        fs::remove_file(&target_path)
+            .map_err(|e| format!("Failed to remove existing '{}': {e}", target_path.display()))?;
     }
 
     fs::copy(&current_exe, &target_path)
@@ -54,8 +68,12 @@ pub fn install_binary() -> Result<(PathBuf, bool), String> {
         let _ = fs::set_permissions(&target_path, perms);
     }
 
-    let in_path = is_dir_in_path(&target_dir);
+    let in_path = is_dir_in_path(target_dir);
     Ok((target_path, in_path))
+}
+
+pub fn install_binary() -> Result<(PathBuf, bool), String> {
+    install_binary_to(&default_install_dir())
 }
 
 pub fn uninstall_binary() -> Result<PathBuf, String> {

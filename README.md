@@ -24,7 +24,16 @@ cargo build --release
 ./target/release/apiman install
 ```
 
-`apiman install` copies the binary to `~/.local/bin/apiman` (and creates the directory if needed).
+`apiman install` force-copies the current binary to `~/.local/bin/apiman` (overwriting any previous install, creating the directory if needed, mode `0755`).
+
+Install to a custom directory instead:
+
+```bash
+apiman install ~/bin
+apiman install /usr/local/bin
+```
+
+If the target directory is not in your `PATH` (including `~/.local/bin` for the default install), `apiman` warns you and prints the `export PATH=...` line to add to `~/.bashrc` or `~/.zshrc`.
 
 To check installation status:
 ```bash
@@ -58,15 +67,22 @@ apiman
 
 - `Ctrl+K` or `?`: Show keybindings help modal
 - `Ctrl+F` or `/`: Search and filter entries across names, tags, and projects
+  (inside search: `Left`/`Right` move the cursor, `Up`/`Down` move selection)
+- `Up` / `Down` or `j` / `k`: Move selection (`PgUp`/`PgDn` jump 10, `Home`/`End` jump to ends)
+- `Left` / `Right`: Cycle project scope filter (`all` -> `global` -> projects)
 - `c`: Copy selected secret value to clipboard (supports Wayland `wl-copy`, X11, macOS, and OSC 52)
 - `Space` or `v`: Toggle masked (`••••••••`) vs revealed secret value
 - `a`: Add new secret entry (interactive form modal)
 - `e`: Edit selected entry
-- `d` or `Delete`: Delete selected entry (with confirmation)
-- `p`: Cycle project filter (`all` -> `global` -> project names)
-- `j` / `k` or `Down` / `Up`: Navigate list
+- `d` or `Delete`: Delete selected entry (`Left`/`Right` + `Enter` to confirm)
+- `i`: Import secrets from a `.env` file
+- `X` (Shift+X): Export visible secrets to a `.env` file (or safe `.env.example` template)
+- `p`: Cycle project filter
+- `j` / `k`: Navigate list (vim-style)
 - `l`: Lock vault and exit
 - `q`: Quit TUI
+
+Inside any form modal: `Tab` / `Up` / `Down` switch fields, `Left` / `Right` / `Home` / `End` move the text cursor, `Delete` removes the character under the cursor, `Ctrl+S` saves, `Esc` cancels.
 
 ### 2. CLI Usage
 
@@ -125,6 +141,32 @@ apiman run --project billing --tag prod -- npm start
 # Execute a shell pipeline or curl command
 apiman run -- sh -c 'curl -H "Authorization: Bearer $OPENAI_API_KEY" https://api.openai.com/v1/models'
 ```
+
+#### Import Secrets From .env Files
+```bash
+# Import every KEY=VALUE pair as a global secret
+apiman import ./.env
+
+# Import into a project scope with tags
+apiman import ./backend/.env --project backend --tags prod
+
+# .env.example files work too (empty placeholders are skipped)
+apiman import ./.env.example --project myapp
+```
+Supports `export KEY=...` prefixes, single/double quotes, `\n` escapes, `#` comments, and reports skipped lines. Existing entries are updated in place.
+
+#### Export Secrets To .env Files
+```bash
+# Write project secrets (with global fallback) to a file (0600 permissions)
+apiman export --project backend --output ./backend/.env
+
+# Generate a safe .env.example template (keys only, no secret values)
+apiman export --format example --output ./.env.example
+
+# Pipe to another tool (raw KEY=VALUE lines)
+apiman export --project billing | wl-copy
+```
+In the TUI, press `i` to import or `X` to export whatever is currently visible (respects search + scope filter).
 
 #### Change Master Password
 ```bash

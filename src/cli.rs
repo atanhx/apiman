@@ -9,8 +9,10 @@ use crate::daemon::{
     check_daemon_status, get_cached_master_key, lock_daemon, run_daemon_loop, spawn_daemon,
     update_daemon_master_key, update_daemon_timeout,
 };
+use crate::dotenv::{format_env, format_example, parse_dotenv, EnvEntry};
 use crate::install::{
-    default_install_dir, installed_binary_path, is_installed, install_binary, uninstall_binary,
+    install_binary_to, installed_binary_path, is_installed, resolve_install_dir,
+    uninstall_binary,
 };
 use crate::security::{harden_process, read_secure_password, SecretString};
 use crate::storage::{
@@ -48,12 +50,20 @@ EXAMPLES:
   # Change the master vault password
   apiman passwd
 
+  # Import secrets from a .env file into a project
+  apiman import ./backend/.env --project backend --tags prod
+
+  # Export secrets back out to .env format
+  apiman export --project backend --output ./backend/.env
+  apiman export --format example --output ./.env.example
+
   # Set auto-lock timeout to 30 minutes, or disable it (always unlocked)
   apiman timeout 30m
   apiman timeout none
 
-  # Install apiman binary to ~/.local/bin/
+  # Install apiman binary to ~/.local/bin/ (or a custom directory)
   apiman install
+  apiman install ~/bin
 ",
     arg_required_else_help = false
 )]
@@ -113,16 +123,28 @@ pub enum Commands {
     Passwd,
 
     #[command(
+        about = "Import secrets from a .env file into the vault",
+        after_help = "EXAMPLES:\n  apiman import ./.env\n  apiman import ./backend/.env --project backend --tags prod\n  apiman import ./.env.example --project myapp"
+    )]
+    Import(ImportArgs),
+
+    #[command(
+        about = "Export secrets to .env format (file, stdout pipe, or safe .env.example)",
+        after_help = "EXAMPLES:\n  apiman export --output ./.env\n  apiman export --project billing --output ./billing.env\n  apiman export --format example --output ./.env.example\n  apiman export --project billing | wl-copy"
+    )]
+    Export(ExportArgs),
+
+    #[command(
         about = "Configure or view auto-lock session timeout (e.g. 15m, 2h, 0, or none)",
         after_help = "EXAMPLES:\n  apiman timeout\n  apiman timeout 30m\n  apiman timeout 2h\n  apiman timeout 900s\n  apiman timeout none    # Keep always unlocked (disable auto-lock)"
     )]
     Timeout(TimeoutArgs),
 
     #[command(
-        about = "Install apiman binary to ~/.local/bin",
-        after_help = "EXAMPLE:\n  apiman install\n  # Copies the current binary to ~/.local/bin/apiman and sets executable permissions"
+        about = "Install apiman binary to ~/.local/bin (or a custom directory)",
+        after_help = "EXAMPLES:\n  apiman install\n  apiman install ~/bin\n  apiman install /usr/local/bin"
     )]
-    Install,
+    Install(InstallArgs),
 
     #[command(
         about = "Uninstall apiman binary from ~/.local/bin",
@@ -235,6 +257,54 @@ pub struct RunArgs {
 }
 
 #[derive(Args, Debug)]
+pub struct ImportArgs {
+    #[arg(help = "Path to the .env / .env.example file to import")]
+    pub file: PathBuf,
+
+    #[arg(short, long, help = "Project scope to import into (defaults to global)")]
+    pub project: Option<String>,
+
+    #[arg(short, long, value_delimiter = ',', help = "Comma-separated tags applied to imported entries")]
+    pub tags: Vec<String>,
+}
+
+#[derive(Args, Debug)]
+pub struct ExportArgs {
+    #[arg(short, long, help = "Write output to this file instead of stdout")]
+    pub output: Option<PathBuf>,
+
+    #[arg(short, long, help = "Project scope to export (includes global entries with project overrides)")]
+    pub project: Option<String>,
+
+    #[arg(short, long, help = "Only export secrets matching this tag")]
+    pub tag: Option<String>,
+
+    #[arg(short, long, value_enum, default_value_t = ExportFormat::Env, help = "Output format")]
+    pub format: ExportFormat,
+
+    #[arg(
+        long,
+        help = "Allow printing secret values to an interactive terminal (not needed for pipes or example format)"
+    )]
+    pub allow_view: bool,
+}
+
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExportFormat {
+    Env,
+    Example,
+}
+
+#[derive(Args, Debug)]
+pub struct InstallArgs {
+    #[arg(
+        help = "Custom directory to install into (defaults to ~/.local/bin). The directory is created if needed.",
+        value_name = "DIR"
+    )]
+    pub path: Option<PathBuf>,
+}
+
+#[derive(Args, Debug)]
 pub struct TimeoutArgs {
     #[arg(
         help = "Timeout duration (e.g. 15m, 1h, 900s, 0, none, never). If omitted, displays current timeout"
@@ -298,6 +368,7 @@ pub fn load_session(
     let socket_path = default_socket_path();
 
     // 1. Try in-memory daemon session first
+    let mut stale_daemon = false;
     if let Some(cached_key) = get_cached_master_key(&socket_path) {
         if let Ok((vault, salt)) = load_vault_with_key(&cached_key, &vault_path) {
             return Ok(SessionContext {
@@ -309,6 +380,9 @@ pub fn load_session(
                 vault,
             });
         }
+        // Daemon is alive but its key does not decrypt this vault
+        // (stale key from another vault or an older session).
+        stale_daemon = true;
     }
 
     if !prompt_if_locked {
@@ -327,6 +401,11 @@ pub fn load_session(
     };
 
     let (vault, master_key, salt) = load_vault_with_password(&password, &vault_path)?;
+
+    if stale_daemon {
+        // Replace the stale daemon so its wrong key stops shadowing this vault.
+        let _ = lock_daemon(&socket_path);
+    }
 
     // Spawn background daemon to retain session key
     let _ = spawn_daemon(
@@ -362,8 +441,10 @@ pub fn handle_cli(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         Commands::Delete(args) => handle_delete(custom_cfg, custom_vault, args),
         Commands::Run(args) => handle_run(custom_cfg, custom_vault, args),
         Commands::Passwd => handle_passwd(custom_cfg, custom_vault),
+        Commands::Import(args) => handle_import(custom_cfg, custom_vault, args),
+        Commands::Export(args) => handle_export(custom_cfg, custom_vault, args),
         Commands::Timeout(args) => handle_timeout(custom_cfg, args),
-        Commands::Install => handle_install(),
+        Commands::Install(args) => handle_install(args),
         Commands::Uninstall => handle_uninstall(),
         Commands::Lock => handle_lock(custom_cfg),
         Commands::Unlock => handle_unlock(custom_cfg, custom_vault),
@@ -665,6 +746,130 @@ fn handle_passwd(
     Ok(ExitCode::SUCCESS)
 }
 
+fn handle_import(
+    custom_cfg: Option<&Path>,
+    custom_vault: Option<&Path>,
+    args: ImportArgs,
+) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    if !args.file.exists() {
+        eprintln!("Error: File '{}' not found.", args.file.display());
+        return Ok(ExitCode::FAILURE);
+    }
+
+    let content = std::fs::read_to_string(&args.file)?;
+    let (entries, skipped) = parse_dotenv(&content);
+
+    let mut ctx = load_session(custom_cfg, custom_vault, true)?;
+    let project = args.project.or_else(|| {
+        if ctx.config.default_project == "global" {
+            None
+        } else {
+            Some(ctx.config.default_project.clone())
+        }
+    });
+
+    let mut imported = 0;
+    let mut empty_skipped = 0;
+    for e in entries {
+        if e.value.is_empty() {
+            empty_skipped += 1;
+            continue;
+        }
+        ctx.vault.set(
+            e.key,
+            SecretString::new(&e.value),
+            project.clone(),
+            args.tags.clone(),
+            None,
+        );
+        imported += 1;
+    }
+    ctx.save()?;
+
+    let scope_msg = project.as_deref().unwrap_or("global");
+    eprintln!(
+        "Imported {imported} entr{} into scope '{scope_msg}' (skipped {skipped} invalid lines, {empty_skipped} empty placeholders).",
+        if imported == 1 { "y" } else { "ies" },
+    );
+    Ok(ExitCode::SUCCESS)
+}
+
+fn handle_export(
+    custom_cfg: Option<&Path>,
+    custom_vault: Option<&Path>,
+    args: ExportArgs,
+) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    let ctx = load_session(custom_cfg, custom_vault, true)?;
+    let is_example = args.format == ExportFormat::Example;
+
+    let output = if is_example {
+        let mut keys: Vec<String> = ctx
+            .vault
+            .list(args.project.as_deref(), args.tag.as_deref())
+            .into_iter()
+            .map(|e| e.name.clone())
+            .collect();
+        keys.sort();
+        keys.dedup();
+        format_example(&keys)
+    } else {
+        let map = ctx
+            .vault
+            .resolve_env_map(args.project.as_deref(), args.tag.as_deref());
+        let mut entries: Vec<EnvEntry> = map
+            .into_iter()
+            .map(|(key, value)| EnvEntry { key, value })
+            .collect();
+        entries.sort_by(|a, b| a.key.cmp(&b.key));
+        format_env(&entries)
+    };
+
+    if let Some(out_path) = args.output {
+        write_secret_file(&out_path, output.as_bytes())?;
+        eprintln!(
+            "Exported {} to '{}'",
+            if is_example { "example template" } else { "secrets" },
+            out_path.display()
+        );
+        return Ok(ExitCode::SUCCESS);
+    }
+
+    let is_tty = io::stdout().is_terminal();
+    if is_tty && !is_example && !args.allow_view {
+        eprintln!(
+            "Notice: Refusing to print secrets to an interactive terminal without --allow-view.\nUse 'apiman export --output FILE', pipe the output ('apiman export | wl-copy'), or pass --allow-view."
+        );
+        return Ok(ExitCode::FAILURE);
+    }
+
+    print!("{output}");
+    io::stdout().flush()?;
+    Ok(ExitCode::SUCCESS)
+}
+
+pub fn write_secret_file(path: &Path, content: &[u8]) -> Result<(), std::io::Error> {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    if !parent.exists() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp_path = path.with_extension("tmp-export");
+    std::fs::write(&tmp_path, content)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o600);
+        let _ = std::fs::set_permissions(&tmp_path, perms);
+    }
+    std::fs::rename(&tmp_path, path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o600);
+        let _ = std::fs::set_permissions(path, perms);
+    }
+    Ok(())
+}
+
 fn handle_timeout(
     custom_cfg: Option<&Path>,
     args: TimeoutArgs,
@@ -750,15 +955,16 @@ pub fn format_duration_friendly(secs: u64) -> String {
     }
 }
 
-fn handle_install() -> Result<ExitCode, Box<dyn std::error::Error>> {
-    let (target, in_path) = install_binary()?;
+fn handle_install(args: InstallArgs) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    let target_dir = resolve_install_dir(args.path.as_deref())
+        .map_err(|e| format!("{e}"))?;
+    let (target, in_path) = install_binary_to(&target_dir)?;
     eprintln!("Installed apiman binary to '{}'", target.display());
     if !in_path {
-        let dir = default_install_dir();
         eprintln!(
-            "Notice: '{}' is not in your current PATH.\nAdd this line to your ~/.bashrc or ~/.zshrc:\n  export PATH=\"{}:$PATH\"",
-            dir.display(),
-            dir.display()
+            "Warning: '{}' is not in your PATH, so 'apiman' will not resolve from a new shell.\nAdd this line to your ~/.bashrc or ~/.zshrc:\n  export PATH=\"{}:$PATH\"",
+            target_dir.display(),
+            target_dir.display()
         );
     }
     Ok(ExitCode::SUCCESS)

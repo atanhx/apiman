@@ -322,9 +322,279 @@ fn test_apiman_end_to_end_lifecycle() {
     assert!(status_str.contains("Vault Path:"));
     assert!(status_str.contains("Installed:"));
 
+    // 17. Import secrets from a .env file
+    let env_file = dir.path().join("import_test.env");
+    std::fs::write(
+        &env_file,
+        "# sample service config\nexport EXPORTED_KEY=exported-value\nPLAIN=plainvalue\nQUOTED_DOUBLE=\"hello world # not a comment\"\nQUOTED_SINGLE='single quoted'\nESCAPED=\"line1\\nline2\"\nINLINE=somevalue # trailing comment\nEMPTY_PLACEHOLDER=\nINVALID LINE WITHOUT EQUALS\n123BADKEY=oops\nSPACED = spaced-value\n",
+    )
+    .unwrap();
+    let import_res = {
+        let mut cmd = apiman(binary, &vault_file, &socket_file, new_password);
+        cmd.args([
+            "import",
+            env_file.to_str().unwrap(),
+            "--project",
+            "backend",
+            "--tags",
+            "e2etag",
+        ]);
+        cmd.output().unwrap()
+    };
+    assert!(import_res.status.success());
+    let import_err = String::from_utf8_lossy(&import_res.stderr);
+    assert!(import_err.contains("Imported 7"), "unexpected: {import_err}");
+
+    let get_quoted = run_cmd(
+        apiman(binary, &vault_file, &socket_file, new_password),
+        &["get", "QUOTED_DOUBLE", "--allow-view"],
+    );
+    assert!(get_quoted.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&get_quoted.stdout).trim(),
+        "hello world # not a comment"
+    );
+
+    let get_exported = run_cmd(
+        apiman(binary, &vault_file, &socket_file, new_password),
+        &["get", "EXPORTED_KEY", "--allow-view"],
+    );
+    assert!(get_exported.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&get_exported.stdout).trim(),
+        "exported-value"
+    );
+
+    let get_escaped = run_cmd(
+        apiman(binary, &vault_file, &socket_file, new_password),
+        &["get", "ESCAPED", "--allow-view"],
+    );
+    assert!(get_escaped.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&get_escaped.stdout).trim(),
+        "line1\nline2"
+    );
+
+    // Importing a .env.example with only placeholders imports nothing
+    let example_file = dir.path().join("placeholders.env");
+    std::fs::write(&example_file, "FUTURE_KEY=\nANOTHER_ONE=\n").unwrap();
+    let import_example = {
+        let mut cmd = apiman(binary, &vault_file, &socket_file, new_password);
+        cmd.args(["import", example_file.to_str().unwrap()]);
+        cmd.output().unwrap()
+    };
+    assert!(import_example.status.success());
+    assert!(String::from_utf8_lossy(&import_example.stderr).contains("Imported 0"));
+
+    // 18. Export secrets to .env file and example template
+    let export_file = dir.path().join("exported.env");
+    let export_res = {
+        let mut cmd = apiman(binary, &vault_file, &socket_file, new_password);
+        cmd.args([
+            "export",
+            "--project",
+            "backend",
+            "--output",
+            export_file.to_str().unwrap(),
+        ]);
+        cmd.output().unwrap()
+    };
+    assert!(export_res.status.success());
+    let exported_text = std::fs::read_to_string(&export_file).unwrap();
+    assert!(exported_text.contains("PLAIN=plainvalue"));
+    assert!(exported_text.contains("QUOTED_DOUBLE=\"hello world # not a comment\""));
+    assert!(exported_text.contains("ESCAPED=\"line1\\nline2\""));
+    assert!(exported_text.contains("DATABASE_URL="));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&export_file).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+
+    let example_out = dir.path().join("exported.env.example");
+    let export_example_res = {
+        let mut cmd = apiman(binary, &vault_file, &socket_file, new_password);
+        cmd.args([
+            "export",
+            "--project",
+            "backend",
+            "--format",
+            "example",
+            "--output",
+            example_out.to_str().unwrap(),
+        ]);
+        cmd.output().unwrap()
+    };
+    assert!(export_example_res.status.success());
+    let example_text = std::fs::read_to_string(&example_out).unwrap();
+    assert!(example_text.contains("PLAIN=\n"));
+    assert!(!example_text.contains("plainvalue"));
+    assert!(!example_text.contains("exported-value"));
+
     // Cleanup isolated daemon
     let _ = run_cmd(
         apiman(binary, &vault_file, &socket_file, new_password),
         &["lock"],
     );
+}
+
+#[test]
+fn test_install_to_custom_dir() {
+    let dir = tempdir().unwrap();
+    let custom_dir = dir.path().join("custom-bin");
+    let binary = env!("CARGO_BIN_EXE_apiman");
+
+    // Install into a directory that does not exist yet (must be created)
+    let install_res = Command::new(binary)
+        .arg("install")
+        .arg(custom_dir.to_str().unwrap())
+        .output()
+        .unwrap();
+    assert!(install_res.status.success());
+    let install_err = String::from_utf8_lossy(&install_res.stderr);
+    assert!(install_err.contains("Installed apiman binary"));
+
+    let installed = custom_dir.join("apiman");
+    assert!(installed.is_file());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&installed).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o755);
+    }
+
+    // Force reinstall over the existing binary
+    let reinstall_res = Command::new(binary)
+        .arg("install")
+        .arg(custom_dir.to_str().unwrap())
+        .output()
+        .unwrap();
+    assert!(reinstall_res.status.success());
+    assert!(installed.is_file());
+
+    // A directory outside PATH must trigger the PATH warning
+    let warning_text = String::from_utf8_lossy(&install_res.stderr);
+    if !is_dir_in_test_path(&custom_dir) {
+        assert!(warning_text.contains("not in your PATH"));
+    }
+}
+
+fn is_dir_in_test_path(dir: &std::path::Path) -> bool {
+    if let Ok(path_var) = std::env::var("PATH") {
+        for entry in std::env::split_paths(&path_var) {
+            if entry == dir {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+#[test]
+fn test_stale_daemon_self_heal() {
+    let dir = tempdir().unwrap();
+    let vault_file: PathBuf = dir.path().join("stale_vault.enc");
+    let socket_file: PathBuf = dir.path().join("stale_daemon.sock");
+    let binary = env!("CARGO_BIN_EXE_apiman");
+    let password = "stale-test-password";
+
+    // Init vault and store one secret (spawns a healthy daemon on the isolated socket)
+    let mut init_child = Command::new(binary);
+    init_child
+        .arg("--vault")
+        .arg(&vault_file)
+        .arg("init")
+        .env("APIMAN_SOCKET", &socket_file)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut init_child = init_child.spawn().unwrap();
+    {
+        let mut stdin = init_child.stdin.take().unwrap();
+        writeln!(stdin, "{password}").unwrap();
+        writeln!(stdin, "{password}").unwrap();
+    }
+    assert!(init_child.wait_with_output().unwrap().status.success());
+
+    let set_res = {
+        let mut cmd = Command::new(binary);
+        cmd.arg("--vault")
+            .arg(&vault_file)
+            .args(["set", "HEAL_KEY", "heal-value"])
+            .env("APIMAN_MASTER_PASSWORD", password)
+            .env("APIMAN_SOCKET", &socket_file);
+        cmd.output().unwrap()
+    };
+    assert!(set_res.status.success());
+
+    // Kill the healthy daemon, then seed a stale one holding a wrong key
+    let mut lock_cmd = Command::new(binary);
+    lock_cmd
+        .arg("lock")
+        .env("APIMAN_SOCKET", &socket_file);
+    assert!(lock_cmd.output().unwrap().status.success());
+
+    let mut seed_child = Command::new(binary);
+    seed_child
+        .args([
+            "daemon",
+            "--run",
+            "--timeout",
+            "900",
+            "--socket",
+            socket_file.to_str().unwrap(),
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    let mut seed_child = seed_child.spawn().unwrap();
+    {
+        let mut stdin = seed_child.stdin.take().unwrap();
+        stdin.write_all(b"XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX").unwrap();
+    }
+    // Give the stale daemon a moment to bind the socket
+    std::thread::sleep(std::time::Duration::from_millis(800));
+
+    // Correct password must still work despite the stale daemon key
+    let get_ok = {
+        let mut cmd = Command::new(binary);
+        cmd.arg("--vault")
+            .arg(&vault_file)
+            .args(["get", "HEAL_KEY", "--allow-view"])
+            .env("APIMAN_MASTER_PASSWORD", password)
+            .env("APIMAN_SOCKET", &socket_file);
+        cmd.output().unwrap()
+    };
+    assert!(get_ok.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&get_ok.stdout).trim(),
+        "heal-value"
+    );
+
+    // The stale daemon must have been replaced: even a wrong password now unlocks via cache
+    let get_cached = {
+        let mut cmd = Command::new(binary);
+        cmd.arg("--vault")
+            .arg(&vault_file)
+            .args(["get", "HEAL_KEY", "--allow-view"])
+            .env("APIMAN_MASTER_PASSWORD", "definitely-wrong-password")
+            .env("APIMAN_SOCKET", &socket_file);
+        cmd.output().unwrap()
+    };
+    assert!(
+        get_cached.status.success(),
+        "daemon still holds stale key: {}",
+        String::from_utf8_lossy(&get_cached.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&get_cached.stdout).trim(),
+        "heal-value"
+    );
+
+    let mut lock_cmd = Command::new(binary);
+    lock_cmd
+        .arg("lock")
+        .env("APIMAN_SOCKET", &socket_file);
+    let _ = lock_cmd.output();
 }
