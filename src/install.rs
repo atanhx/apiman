@@ -22,7 +22,7 @@ pub fn is_installed() -> bool {
 pub fn is_dir_in_path(dir: &Path) -> bool {
     if let Ok(path_var) = std::env::var("PATH") {
         for entry in std::env::split_paths(&path_var) {
-            if entry == dir {
+            if normalize(&entry) == normalize(dir) {
                 return true;
             }
         }
@@ -30,8 +30,18 @@ pub fn is_dir_in_path(dir: &Path) -> bool {
     false
 }
 
+fn normalize(p: &Path) -> String {
+    let s = p.to_string_lossy();
+    let trimmed = s.trim_end_matches('/');
+    if trimmed.is_empty() {
+        return "/".to_string();
+    }
+    trimmed.to_string()
+}
+
 pub fn resolve_install_dir(custom: Option<&Path>) -> Result<PathBuf, String> {
     if let Some(dir) = custom {
+        let dir = expand_tilde(dir);
         if dir.exists() && !dir.is_dir() {
             return Err(format!(
                 "Install path '{}' exists and is not a directory.",
@@ -76,8 +86,11 @@ pub fn install_binary() -> Result<(PathBuf, bool), String> {
     install_binary_to(&default_install_dir())
 }
 
-pub fn uninstall_binary() -> Result<PathBuf, String> {
-    let target_path = installed_binary_path();
+pub fn uninstall_binary(custom_dir: Option<&Path>) -> Result<PathBuf, String> {
+    let target_path = match custom_dir {
+        Some(dir) => expand_tilde(dir).join("apiman"),
+        None => installed_binary_path(),
+    };
     if !target_path.exists() {
         return Err(format!(
             "apiman is not installed at '{}'",
@@ -89,4 +102,14 @@ pub fn uninstall_binary() -> Result<PathBuf, String> {
         .map_err(|e| format!("Failed to remove '{}': {e}", target_path.display()))?;
 
     Ok(target_path)
+}
+
+fn expand_tilde(p: &Path) -> PathBuf {
+    let s = p.to_string_lossy();
+    if let Some(rest) = s.strip_prefix("~/") {
+        if let Some(base) = BaseDirs::new() {
+            return base.home_dir().join(rest);
+        }
+    }
+    p.to_path_buf()
 }

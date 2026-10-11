@@ -20,6 +20,7 @@ use crate::storage::{
     StorageError,
 };
 use crate::vault::Vault;
+use crate::vault::validate_secret_name;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -147,10 +148,10 @@ pub enum Commands {
     Install(InstallArgs),
 
     #[command(
-        about = "Uninstall apiman binary from ~/.local/bin",
-        after_help = "EXAMPLE:\n  apiman uninstall\n  # Removes the installed binary from ~/.local/bin/apiman"
+        about = "Uninstall apiman binary from ~/.local/bin (or a custom directory)",
+        after_help = "EXAMPLES:\n  apiman uninstall\n  apiman uninstall ~/bin"
     )]
-    Uninstall,
+    Uninstall(UninstallArgs),
 
     #[command(
         about = "Lock the vault and terminate the in-memory session daemon",
@@ -305,6 +306,15 @@ pub struct InstallArgs {
 }
 
 #[derive(Args, Debug)]
+pub struct UninstallArgs {
+    #[arg(
+        help = "Custom directory to uninstall from (defaults to ~/.local/bin).",
+        value_name = "DIR"
+    )]
+    pub path: Option<PathBuf>,
+}
+
+#[derive(Args, Debug)]
 pub struct TimeoutArgs {
     #[arg(
         help = "Timeout duration (e.g. 15m, 1h, 900s, 0, none, never). If omitted, displays current timeout"
@@ -445,7 +455,7 @@ pub fn handle_cli(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
         Commands::Export(args) => handle_export(custom_cfg, custom_vault, args),
         Commands::Timeout(args) => handle_timeout(custom_cfg, args),
         Commands::Install(args) => handle_install(args),
-        Commands::Uninstall => handle_uninstall(),
+        Commands::Uninstall(args) => handle_uninstall(args),
         Commands::Lock => handle_lock(custom_cfg),
         Commands::Unlock => handle_unlock(custom_cfg, custom_vault),
         Commands::Status => handle_status(custom_cfg, custom_vault),
@@ -455,10 +465,14 @@ pub fn handle_cli(cli: Cli) -> Result<ExitCode, Box<dyn std::error::Error>> {
 }
 
 fn handle_init(
-    _custom_cfg: Option<&Path>,
+    custom_cfg: Option<&Path>,
     custom_vault: Option<&Path>,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
-    let config = Config::load_or_default();
+    let cfg_path = custom_cfg
+        .map(PathBuf::from)
+        .unwrap_or_else(Config::config_file_path);
+    let config =
+        Config::load_from(&cfg_path).unwrap_or_else(|| Config::load_or_default());
     let vault_path = custom_vault
         .map(PathBuf::from)
         .unwrap_or_else(|| config.vault_path.clone());
@@ -498,6 +512,8 @@ fn handle_init(
     pw2.zeroize();
 
     let socket_path = default_socket_path();
+    // Drop any live daemon holding a key for a previous vault at this path.
+    let _ = lock_daemon(&socket_path);
     let _ = spawn_daemon(
         &master_key,
         config.auto_lock_timeout_seconds,
@@ -515,6 +531,8 @@ fn handle_set(
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
     let mut ctx = load_session(custom_cfg, custom_vault, true)?;
 
+    let name = validate_secret_name(&args.name)?;
+
     let mut secret_val = if let Some(v) = args.value {
         v
     } else {
@@ -530,7 +548,7 @@ fn handle_set(
     });
 
     ctx.vault.set(
-        args.name.clone(),
+        name.clone(),
         SecretString::new(&secret_val),
         project.clone(),
         args.tags,
@@ -540,7 +558,7 @@ fn handle_set(
 
     ctx.save()?;
     let scope_msg = project.as_deref().unwrap_or("global");
-    eprintln!("Secret '{}' saved (scope: {})", args.name, scope_msg);
+    eprintln!("Secret '{name}' saved (scope: {scope_msg})");
     Ok(ExitCode::SUCCESS)
 }
 
@@ -638,24 +656,23 @@ fn handle_delete(
     args: DeleteArgs,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
     let mut ctx = load_session(custom_cfg, custom_vault, true)?;
-    let deleted = ctx.vault.delete(&args.name, args.project.as_deref());
 
-    if deleted {
-        ctx.save()?;
-        eprintln!(
-            "Secret '{}' deleted from project '{}'",
-            args.name,
-            args.project.as_deref().unwrap_or("global")
-        );
-        Ok(ExitCode::SUCCESS)
-    } else {
-        eprintln!(
-            "Error: Secret '{}' not found in project '{}'",
-            args.name,
-            args.project.as_deref().unwrap_or("global")
-        );
-        Ok(ExitCode::FAILURE)
-    }
+    let target = match ctx.vault.get(&args.name, args.project.as_deref()) {
+        Some(e) => e.clone(),
+        None => {
+            eprintln!("Error: Secret '{}' not found", args.name);
+            return Ok(ExitCode::FAILURE);
+        }
+    };
+
+    ctx.vault.entries.retain(|e| e.id != target.id);
+    ctx.save()?;
+    eprintln!(
+        "Secret '{}' deleted from scope '{}'",
+        target.name,
+        target.project_display()
+    );
+    Ok(ExitCode::SUCCESS)
 }
 
 fn handle_run(
@@ -676,6 +693,9 @@ fn handle_run(
 
     let mut child = std::process::Command::new(prog);
     child.args(prog_args);
+    // Never leak the master password itself into the child environment.
+    child.env_remove("APIMAN_MASTER_PASSWORD");
+    child.env_remove("APIMAN_PASSWORD");
     for (k, v) in &env_map {
         child.env(k, v);
     }
@@ -764,7 +784,7 @@ fn handle_import(
     }
 
     let content = std::fs::read_to_string(&args.file)?;
-    let (entries, skipped) = parse_dotenv(&content);
+    let (entries, mut skipped) = parse_dotenv(&content);
 
     let mut ctx = load_session(custom_cfg, custom_vault, true)?;
     let project = args.project.or_else(|| {
@@ -782,8 +802,15 @@ fn handle_import(
             empty_skipped += 1;
             continue;
         }
+        let key = match validate_secret_name(&e.key) {
+            Ok(k) => k,
+            Err(_) => {
+                skipped += 1;
+                continue;
+            }
+        };
         ctx.vault.set(
-            e.key,
+            key,
             SecretString::new(&e.value),
             project.clone(),
             args.tags.clone(),
@@ -991,8 +1018,8 @@ fn handle_install(args: InstallArgs) -> Result<ExitCode, Box<dyn std::error::Err
     Ok(ExitCode::SUCCESS)
 }
 
-fn handle_uninstall() -> Result<ExitCode, Box<dyn std::error::Error>> {
-    let target = uninstall_binary()?;
+fn handle_uninstall(args: UninstallArgs) -> Result<ExitCode, Box<dyn std::error::Error>> {
+    let target = uninstall_binary(args.path.as_deref())?;
     eprintln!("Uninstalled apiman binary from '{}'", target.display());
     Ok(ExitCode::SUCCESS)
 }
@@ -1014,10 +1041,14 @@ fn handle_unlock(
 }
 
 fn handle_status(
-    _custom_cfg: Option<&Path>,
+    custom_cfg: Option<&Path>,
     custom_vault: Option<&Path>,
 ) -> Result<ExitCode, Box<dyn std::error::Error>> {
-    let config = Config::load_or_default();
+    let cfg_path = custom_cfg
+        .map(PathBuf::from)
+        .unwrap_or_else(Config::config_file_path);
+    let config =
+        Config::load_from(&cfg_path).unwrap_or_else(|| Config::load_or_default());
     let vault_path = custom_vault
         .map(PathBuf::from)
         .unwrap_or_else(|| config.vault_path.clone());

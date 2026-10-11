@@ -26,9 +26,10 @@ impl SecretEntry {
         description: Option<String>,
     ) -> Self {
         let now = current_timestamp();
-        let normalized_project = match project.as_deref() {
-            None | Some("") | Some("global") => None,
-            Some(p) => Some(p.trim().to_string()),
+        let normalized_project = match project.as_deref().map(str::trim) {
+            None | Some("") => None,
+            Some(p) if p.eq_ignore_ascii_case("global") => None,
+            Some(p) => Some(p.to_string()),
         };
 
         Self {
@@ -81,9 +82,10 @@ impl Vault {
         description: Option<String>,
     ) -> &SecretEntry {
         let normalized_name = name.trim().to_string();
-        let normalized_project = match project.as_deref() {
-            None | Some("") | Some("global") => None,
-            Some(p) => Some(p.trim().to_string()),
+        let normalized_project = match project.as_deref().map(str::trim) {
+            None | Some("") => None,
+            Some(p) if p.eq_ignore_ascii_case("global") => None,
+            Some(p) => Some(p.to_string()),
         };
 
         if let Some(pos) = self.entries.iter().position(|e| {
@@ -139,47 +141,24 @@ impl Vault {
         None
     }
 
-    pub fn get_exact(&self, name: &str, project: Option<&str>) -> Option<&SecretEntry> {
-        let normalized_name = name.trim();
-        let normalized_project = match project.map(str::trim) {
-            None | Some("") | Some("global") => None,
-            Some(p) => Some(p),
-        };
-
-        self.entries.iter().find(|e| {
-            e.name == normalized_name && e.project.as_deref() == normalized_project
-        })
-    }
-
-    pub fn delete(&mut self, name: &str, project: Option<&str>) -> bool {
-        let normalized_name = name.trim();
-        let normalized_project = match project.map(str::trim) {
-            None | Some("") | Some("global") => None,
-            Some(p) => Some(p),
-        };
-
-        if let Some(pos) = self.entries.iter().position(|e| {
-            e.name == normalized_name && e.project.as_deref() == normalized_project
-        }) {
-            self.entries.remove(pos);
-            true
-        } else {
-            false
-        }
-    }
-
     pub fn list(&self, project_filter: Option<&str>, tag_filter: Option<&str>) -> Vec<&SecretEntry> {
         self.entries
             .iter()
             .filter(|e| {
                 if let Some(p) = project_filter {
                     let p_clean = p.trim();
-                    if p_clean != "all" {
-                        if p_clean == "global" {
+                    if !p_clean.eq_ignore_ascii_case("all") {
+                        if p_clean.eq_ignore_ascii_case("global") {
                             if !e.is_global() {
                                 return false;
                             }
-                        } else if e.project.as_deref() != Some(p_clean) && !e.is_global() {
+                        } else if e
+                            .project
+                            .as_deref()
+                            .map(|ep| !ep.eq_ignore_ascii_case(p_clean))
+                            .unwrap_or(true)
+                            && !e.is_global()
+                        {
                             return false;
                         }
                     }
@@ -212,9 +191,14 @@ impl Vault {
             map.insert(entry.name.clone(), entry.value.expose_secret().to_string());
         }
 
-        // 2. Overlay project entries
-        if let Some(proj) = project.map(str::trim).filter(|p| !p.is_empty() && *p != "global") {
-            for entry in self.entries.iter().filter(|e| e.project.as_deref() == Some(proj)) {
+        // 2. Overlay project entries (scope match is case-insensitive like get/list)
+        if let Some(proj) = project.map(str::trim).filter(|p| !p.is_empty() && !p.eq_ignore_ascii_case("global")) {
+            for entry in self.entries.iter().filter(|e| {
+                e.project
+                    .as_deref()
+                    .map(|ep| ep.eq_ignore_ascii_case(proj))
+                    .unwrap_or(false)
+            }) {
                 if let Some(t) = tag_filter {
                     if !entry.tags.iter().any(|tag| tag.eq_ignore_ascii_case(t)) {
                         continue;
@@ -242,4 +226,22 @@ fn current_timestamp() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+pub fn validate_secret_name(name: &str) -> Result<String, String> {
+    let normalized = name.trim().to_string();
+    if normalized.is_empty() {
+        return Err("Secret name cannot be empty".to_string());
+    }
+    if normalized.contains('=') {
+        return Err(format!(
+            "Invalid secret name '{normalized}': '=' is not allowed (breaks .env format)"
+        ));
+    }
+    if normalized.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err(format!(
+            "Invalid secret name '{normalized}': whitespace and control characters are not allowed"
+        ));
+    }
+    Ok(normalized)
 }

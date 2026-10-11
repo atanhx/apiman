@@ -83,9 +83,10 @@ pub fn copy_to_clipboard(text: &str) -> Result<(), String> {
     let b64 = base64_encode(text.as_bytes());
     let osc52 = format!("\x1b]52;c;{}\x07", b64);
     if let Ok(mut tty) = std::fs::OpenOptions::new().write(true).open("/dev/tty") {
-        let _ = tty.write_all(osc52.as_bytes());
-        let _ = tty.flush();
-        return Ok(());
+        if tty.write_all(osc52.as_bytes()).is_ok() && tty.flush().is_ok() {
+            return Ok(());
+        }
+        return Err("Could not copy: terminal rejected the clipboard write".to_string());
     }
 
     Err("Could not copy: no clipboard backend available (wl-copy, xclip, xsel, pbcopy, arboard)".to_string())

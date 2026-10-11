@@ -15,7 +15,12 @@ fn main() -> ExitCode {
     let is_tui_requested = cli.command.is_none() || matches!(cli.command, Some(Commands::Tui));
 
     if is_tui_requested {
-        let config = Config::load_or_default();
+        let cfg_path = cli
+            .config
+            .clone()
+            .unwrap_or_else(Config::config_file_path);
+        let config =
+            Config::load_from(&cfg_path).unwrap_or_else(|| Config::load_or_default());
         let vault_path = cli
             .vault
             .clone()
@@ -98,6 +103,7 @@ fn interactive_init(
     pw2.zeroize();
 
     let socket_path = apiman::config::default_socket_path();
+    let _ = apiman::daemon::lock_daemon(&socket_path);
     let _ = apiman::daemon::spawn_daemon(
         &master_key,
         config.auto_lock_timeout_seconds,

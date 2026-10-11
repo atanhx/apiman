@@ -501,10 +501,7 @@ impl App {
     }
 
     pub fn save_form(&mut self) -> Result<(), String> {
-        let name = self.form_state.name.text.trim().to_string();
-        if name.is_empty() {
-            return Err("Secret name cannot be empty".to_string());
-        }
+        let name = crate::vault::validate_secret_name(&self.form_state.name.text)?;
 
         let proj = self.form_state.project.text.trim().to_string();
         let project = if proj.is_empty() || proj.eq_ignore_ascii_case("global") {

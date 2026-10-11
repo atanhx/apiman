@@ -43,6 +43,7 @@ apiman status
 To remove the installed binary:
 ```bash
 apiman uninstall
+apiman uninstall ~/bin   # match a custom install directory
 ```
 
 ## Running Tests
@@ -84,7 +85,7 @@ apiman
 - `p`: Cycle project filter
 - `j` / `k`: Navigate list (vim-style)
 - `l`: Lock vault and exit
-- `q`: Quit TUI
+- `q` or `Ctrl+C`: Quit TUI (Ctrl+C works from inside any dialog too)
 
 Inside any form modal: `Tab` / `Up` / `Down` switch fields, `Left` / `Right` / `Home` / `End` move the text cursor, `Delete` removes the character under the cursor, `Ctrl+S` saves, `Esc` cancels.
 
@@ -174,6 +175,12 @@ apiman export --format example --output ./.env.example
 apiman export --project billing | wl-copy
 ```
 In the TUI, press `i` to import or `X` to export whatever is currently visible (respects search + scope filter). Path fields show grey placeholder examples and support `Tab` filesystem autocompletion.
+
+#### Delete a Secret
+```bash
+apiman delete STRIPE_SECRET_KEY --project billing
+```
+Delete resolves the same way `get` does (explicit scope, then global, then any project; case-insensitive), so the entry `get` finds is the entry `delete` removes.
 
 #### Change Master Password
 ```bash

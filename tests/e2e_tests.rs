@@ -946,3 +946,160 @@ fn test_tui_multiselect_bulk_edit() {
     assert!(!app.in_group_mode());
     assert_eq!(app.ctx.vault.entries.len(), 1);
 }
+
+#[test]
+fn test_cli_delete_resolution_run_hygiene_and_validation() {
+    let dir = tempdir().unwrap();
+    let vault_file = dir.path().join("fixups_vault.enc");
+    let socket_file = dir.path().join("fixups_daemon.sock");
+    let binary = env!("CARGO_BIN_EXE_apiman");
+    let password = "fixups-password";
+
+    let mut init_child = Command::new(binary);
+    init_child
+        .arg("--vault")
+        .arg(&vault_file)
+        .arg("init")
+        .env("APIMAN_SOCKET", &socket_file)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut init_child = init_child.spawn().unwrap();
+    {
+        let mut stdin = init_child.stdin.take().unwrap();
+        writeln!(stdin, "{password}").unwrap();
+        writeln!(stdin, "{password}").unwrap();
+    }
+    assert!(init_child.wait_with_output().unwrap().status.success());
+
+    let cli = |extra: &[&str]| -> std::process::Output {
+        let mut cmd = Command::new(binary);
+        cmd.arg("--vault").arg(&vault_file).args(extra);
+        cmd.env("APIMAN_MASTER_PASSWORD", password);
+        cmd.env("APIMAN_SOCKET", &socket_file);
+        cmd.output().unwrap()
+    };
+
+    // Mixed-case name in a mixed-case project
+    assert!(cli(&["set", "CaseKey", "case-value", "--project", "MyProj"]).status.success());
+
+    // Delete resolves case-insensitively across projects without --project
+    let del = cli(&["delete", "casekey"]);
+    assert!(del.status.success(), "{}", String::from_utf8_lossy(&del.stderr));
+    let get_gone = cli(&["get", "CaseKey", "--allow-view"]);
+    assert!(!get_gone.status.success());
+
+    // Deleting something missing still fails cleanly
+    assert!(!cli(&["delete", "NoSuchKey"]).status.success());
+
+    // Secret names that would corrupt .env output or env injection are rejected
+    assert!(!cli(&["set", "BAD=NAME", "x"]).status.success());
+    assert!(!cli(&["set", "BAD NAME", "x"]).status.success());
+
+    // `run` must not leak the master password into the child environment
+    assert!(cli(&["set", "PING", "pong"]).status.success());
+    let run_out = cli(&["run", "--", "sh", "-c", "echo [$APIMAN_MASTER_PASSWORD][$APIMAN_PASSWORD][$PING]"]);
+    assert!(run_out.status.success());
+    assert_eq!(String::from_utf8_lossy(&run_out.stdout).trim(), "[][][pong]");
+
+    // BOM-prefixed files import cleanly
+    let bom_file = dir.path().join("bom.env");
+    std::fs::write(&bom_file, "\u{FEFF}BOM_KEY=bom-value\n").unwrap();
+    let import_out = {
+        let mut cmd = Command::new(binary);
+        cmd.arg("--vault").arg(&vault_file);
+        cmd.args(["import", bom_file.to_str().unwrap()]);
+        cmd.env("APIMAN_MASTER_PASSWORD", password);
+        cmd.env("APIMAN_SOCKET", &socket_file);
+        cmd.output().unwrap()
+    };
+    assert!(import_out.status.success());
+    let get_bom = cli(&["get", "BOM_KEY", "--allow-view"]);
+    assert!(get_bom.status.success());
+    assert_eq!(String::from_utf8_lossy(&get_bom.stdout).trim(), "bom-value");
+
+    // `status --config` honors a custom config file
+    let cfg_file = dir.path().join("custom.json");
+    std::fs::write(
+        &cfg_file,
+        format!(
+            "{{\"vault_path\": \"{}\", \"auto_lock_timeout_seconds\": 60, \"default_project\": \"global\", \"clipboard_timeout_seconds\": 30}}",
+            vault_file.display()
+        ),
+    )
+    .unwrap();
+    let status_out = {
+        let mut cmd = Command::new(binary);
+        cmd.arg("--config").arg(&cfg_file).arg("status");
+        cmd.env("APIMAN_SOCKET", &socket_file);
+        cmd.output().unwrap()
+    };
+    assert!(status_out.status.success());
+    let status_str = String::from_utf8_lossy(&status_out.stdout);
+    assert!(status_str.contains("fixups_vault.enc"));
+
+    // Install + uninstall roundtrip inside an isolated directory
+    let bindir = dir.path().join("bin");
+    let inst = {
+        let mut cmd = Command::new(binary);
+        cmd.args(["install", bindir.to_str().unwrap()]);
+        cmd.output().unwrap()
+    };
+    assert!(inst.status.success());
+    assert!(bindir.join("apiman").is_file());
+    let uninst = {
+        let mut cmd = Command::new(binary);
+        cmd.args(["uninstall", bindir.to_str().unwrap()]);
+        cmd.output().unwrap()
+    };
+    assert!(uninst.status.success());
+    assert!(!bindir.join("apiman").exists());
+
+    let mut lock_cmd = Command::new(binary);
+    lock_cmd.arg("lock").env("APIMAN_SOCKET", &socket_file);
+    let _ = lock_cmd.output();
+}
+
+#[test]
+fn test_tui_ctrl_key_guards() {
+    use apiman::tui::{app::App, input::handle_key};
+    use apiman::{cli::SessionContext, config::Config, storage};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    let dir = tempdir().unwrap();
+    let vault_file: PathBuf = dir.path().join("guards_vault.enc");
+    let socket_file: PathBuf = dir.path().join("guards_daemon.sock");
+    let password = "guards-password";
+
+    let (mut vault, master_key, salt) = storage::init_vault(password, &vault_file).unwrap();
+    vault.set("GUARD_KEY".to_string(), "guard-value".into(), None, Vec::new(), None);
+    storage::save_vault(&vault, &master_key, &salt, &vault_file).unwrap();
+
+    let (vault, master_key, salt) =
+        storage::load_vault_with_password(password, &vault_file).unwrap();
+    let ctx = SessionContext {
+        config: Config::default(),
+        vault_path: vault_file,
+        socket_path: socket_file,
+        master_key,
+        salt,
+        vault,
+    };
+    let mut app = App::new(ctx);
+
+    let ctrl = |code: KeyCode| KeyEvent::new(code, KeyModifiers::CONTROL);
+    let plain = |code: KeyCode| KeyEvent::new(code, KeyModifiers::empty());
+
+    // Ctrl+D must NOT open the delete dialog; Ctrl+E must NOT open the editor
+    handle_key(&mut app, ctrl(KeyCode::Char('d')));
+    assert_eq!(app.active_modal, apiman::tui::app::ActiveModal::None);
+    assert_eq!(app.ctx.vault.entries.len(), 1);
+    handle_key(&mut app, ctrl(KeyCode::Char('e')));
+    assert_eq!(app.active_modal, apiman::tui::app::ActiveModal::None);
+
+    // Ctrl+C quits even from inside a modal
+    handle_key(&mut app, plain(KeyCode::Char('a')));
+    assert_eq!(app.active_modal, apiman::tui::app::ActiveModal::Add);
+    handle_key(&mut app, ctrl(KeyCode::Char('c')));
+    assert!(app.should_quit);
+}

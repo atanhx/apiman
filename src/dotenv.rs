@@ -18,7 +18,8 @@ pub fn parse_dotenv(text: &str) -> (Vec<EnvEntry>, usize) {
     let mut skipped = 0;
 
     for raw_line in text.lines() {
-        let line = raw_line.trim();
+        // Strip a UTF-8 BOM if present on the first line.
+        let line = raw_line.trim().strip_prefix('\u{FEFF}').unwrap_or(raw_line.trim());
         if line.is_empty() || line.starts_with('#') {
             continue;
         }

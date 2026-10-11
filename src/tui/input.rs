@@ -3,6 +3,14 @@ use crate::tui::app::{complete_path, ActiveModal, App, PathFormState, TextField}
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 pub fn handle_key(app: &mut App, key: KeyEvent) {
+    // Ctrl+C quits from anywhere, including inside modals and text fields.
+    if key.code == KeyCode::Char('c')
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+        && !key.modifiers.contains(KeyModifiers::ALT)
+    {
+        app.should_quit = true;
+        return;
+    }
     match &app.active_modal {
         ActiveModal::KeybindingsHelp => handle_help_key(app, key),
         ActiveModal::DeleteConfirm(_) => handle_delete_key(app, key),
@@ -15,7 +23,11 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
 }
 
 fn handle_normal_key(app: &mut App, key: KeyEvent) {
-    if key.modifiers.contains(KeyModifiers::CONTROL) {
+    // Swallow unhandled Ctrl/Alt combinations so e.g. Ctrl+D never deletes
+    // and Ctrl+E never opens the editor. Handled combos return above.
+    if key.modifiers.contains(KeyModifiers::CONTROL)
+        || key.modifiers.contains(KeyModifiers::ALT)
+    {
         match key.code {
             KeyCode::Char('k') => {
                 app.active_modal = ActiveModal::KeybindingsHelp;
@@ -26,11 +38,7 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) {
                 app.active_modal = ActiveModal::Search;
                 return;
             }
-            KeyCode::Char('c') => {
-                app.should_quit = true;
-                return;
-            }
-            _ => {}
+            _ => return,
         }
     }
 
@@ -176,14 +184,22 @@ fn handle_help_key(app: &mut App, key: KeyEvent) {
     }
 }
 
+fn has_ctrl_or_alt(key: &KeyEvent) -> bool {
+    key.modifiers.contains(KeyModifiers::CONTROL)
+        || key.modifiers.contains(KeyModifiers::ALT)
+}
+
 fn handle_delete_key(app: &mut App, key: KeyEvent) {
     match key.code {
-        KeyCode::Char('y') | KeyCode::Char('Y') => {
+        KeyCode::Char('y') | KeyCode::Char('Y') if !has_ctrl_or_alt(&key) => {
             if let Err(e) = app.delete_selected_entry() {
                 app.set_status(format!("Error deleting: {e}"));
             }
         }
-        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+        KeyCode::Esc => {
+            app.active_modal = ActiveModal::None;
+        }
+        KeyCode::Char('n') | KeyCode::Char('N') if !has_ctrl_or_alt(&key) => {
             app.active_modal = ActiveModal::None;
         }
         KeyCode::Left | KeyCode::Right | KeyCode::Tab => {
@@ -231,6 +247,7 @@ fn handle_search_key(app: &mut App, key: KeyEvent) {
             app.search_query.delete_at_cursor();
             app.update_filtered_indices();
         }
+        KeyCode::Char(_) if has_ctrl_or_alt(&key) => {}
         KeyCode::Char(c) => {
             app.search_query.insert_char(c);
             app.update_filtered_indices();
@@ -299,6 +316,7 @@ fn handle_form_key(app: &mut App, key: KeyEvent) {
         KeyCode::Delete => {
             app.form_state.active_field_mut().delete_at_cursor();
         }
+        KeyCode::Char(_) if has_ctrl_or_alt(&key) => {}
         KeyCode::Char(c) => {
             app.form_state.active_field_mut().insert_char(c);
         }
@@ -351,6 +369,7 @@ fn handle_bulk_key(app: &mut App, key: KeyEvent) {
         KeyCode::Delete => {
             app.bulk_form.active_field_mut().delete_at_cursor();
         }
+        KeyCode::Char(_) if has_ctrl_or_alt(&key) => {}
         KeyCode::Char(c) => {
             app.bulk_form.active_field_mut().insert_char(c);
         }
@@ -406,8 +425,7 @@ fn handle_path_form_key(app: &mut App, key: KeyEvent) {    let is_export = app.a
         }
         KeyCode::Char(' ') if is_export && app.path_form.active_field == 1 => {
             app.path_form.export_example = !app.path_form.export_example;
-        }
-        KeyCode::Enter => {
+        }        KeyCode::Enter => {
             if app.path_form.active_field == 1 {
                 let res = if is_export {
                     app.run_export()
@@ -431,6 +449,7 @@ fn handle_path_form_key(app: &mut App, key: KeyEvent) {    let is_export = app.a
                 app.path_form.active_field_mut().delete_at_cursor();
             }
         }
+        KeyCode::Char(_) if has_ctrl_or_alt(&key) => {}
         KeyCode::Char(c) => {
             if is_export && app.path_form.active_field == 1 {
                 // Format row is toggled with Left/Right/Space only.
