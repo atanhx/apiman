@@ -619,6 +619,105 @@ fn test_stale_daemon_self_heal() {    let dir = tempdir().unwrap();
 }
 
 #[test]
+fn test_tui_pin_interleaved_and_group_space() {
+    use apiman::tui::{app::App, input::handle_key};
+    use apiman::{cli::SessionContext, config::Config, storage};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn press(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::empty())
+    }
+    fn shifted(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::SHIFT)
+    }
+
+    let dir = tempdir().unwrap();
+    let vault_file: PathBuf = dir.path().join("pin_vault.enc");
+    let socket_file: PathBuf = dir.path().join("pin_daemon.sock");
+    let password = "pin-test-password";
+
+    let (mut vault, master_key, salt) = storage::init_vault(password, &vault_file).unwrap();
+    for name in ["K1", "K2", "K3", "K4"] {
+        vault.set(
+            name.to_string(),
+            format!("{name}-value").as_str().into(),
+            None,
+            Vec::new(),
+            None,
+        );
+    }
+    storage::save_vault(&vault, &master_key, &salt, &vault_file).unwrap();
+
+    let (vault, master_key, salt) =
+        storage::load_vault_with_password(password, &vault_file).unwrap();
+    let ctx = SessionContext {
+        config: Config::default(),
+        vault_path: vault_file,
+        socket_path: socket_file,
+        master_key,
+        salt,
+        vault,
+    };
+    let mut app = App::new(ctx);
+
+    // Tab pins K1 and advances; plain Down keeps the pin; Tab pins K3 -> interleaved {K1, K3}
+    handle_key(&mut app, press(KeyCode::Tab));
+    assert!(app.in_group_mode());
+    assert_eq!(app.marked.len(), 1);
+    handle_key(&mut app, press(KeyCode::Down));
+    assert_eq!(app.marked.len(), 1);
+    assert_eq!(app.selected_index, 2);
+    handle_key(&mut app, press(KeyCode::Tab));
+    assert_eq!(app.marked.len(), 2);
+    let marked_names: Vec<String> = app
+        .marked
+        .iter()
+        .filter_map(|&i| app.ctx.vault.entries.get(i))
+        .map(|e| e.name.clone())
+        .collect();
+    assert!(marked_names.contains(&"K1".to_string()));
+    assert!(marked_names.contains(&"K3".to_string()));
+
+    // Shift+Down from the latest cursor extends the range and unions with pins
+    handle_key(&mut app, shifted(KeyCode::Down));
+    assert_eq!(app.marked.len(), 3);
+
+    // Space in group mode reveals exactly the marked entries, then masks them again
+    handle_key(&mut app, press(KeyCode::Char(' ')));
+    assert_eq!(app.revealed_entries.len(), 3);
+    handle_key(&mut app, press(KeyCode::Char(' ')));
+    assert!(app.revealed_entries.is_empty());
+
+    // Bulk edit applies to the interleaved pins only
+    handle_key(&mut app, press(KeyCode::Esc));
+    assert!(!app.in_group_mode());
+    handle_key(&mut app, press(KeyCode::Home));
+    handle_key(&mut app, press(KeyCode::Tab));
+    handle_key(&mut app, press(KeyCode::Down));
+    handle_key(&mut app, press(KeyCode::Tab));
+    handle_key(&mut app, press(KeyCode::Char('e')));
+    assert_eq!(app.active_modal, apiman::tui::app::ActiveModal::BulkEdit);
+    for c in "teamp".chars() {
+        handle_key(&mut app, press(KeyCode::Char(c)));
+    }
+    handle_key(&mut app, press(KeyCode::Tab));
+    for c in "shared".chars() {
+        handle_key(&mut app, press(KeyCode::Char(c)));
+    }
+    handle_key(&mut app, press(KeyCode::Enter));
+    for name in ["K1", "K3"] {
+        let entry = app.ctx.vault.get(name, Some("teamp")).unwrap();
+        assert_eq!(entry.tags, vec!["shared".to_string()]);
+    }
+    // Untouched entries kept global scope and values
+    for name in ["K2", "K4"] {
+        let entry = app.ctx.vault.get(name, None).unwrap();
+        assert!(entry.is_global());
+        assert_eq!(entry.value.expose_secret(), format!("{name}-value"));
+    }
+}
+
+#[test]
 fn test_tui_reveal_all_and_path_completion() {
     use apiman::tui::{app::App, input::handle_key};
     use apiman::{cli::SessionContext, config::Config, storage};

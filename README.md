@@ -74,7 +74,8 @@ apiman
 - `Space` or `v`: Toggle masked (`••••••••`) vs revealed secret value (single entry)
 - `Shift+Space` or `*` or `V`: Reveal / mask ALL currently visible secrets at once
 - `Shift+Up` / `Shift+Down`: Select multiple entries (group mode, marked with `+`)
-  - In group mode: `e` bulk-edits project/tags for all selected (values are never touched — blank fields keep current values, `global` moves entries to global scope), `d` deletes all selected, `Esc` clears the selection
+- `Tab`: Pin/unpin single entries anywhere and advance (pick 1, 4, 6...); composes with Shift-ranges
+  - In group mode: `Space` reveals/masks the marked entries, `e` bulk-edits project/tags for all selected (values are never touched — blank fields keep current values, `global` moves entries to global scope), `d` deletes all selected, `Esc` clears the selection
 - `a`: Add new secret entry (interactive form modal)
 - `e`: Edit selected entry
 - `d` or `Delete`: Delete selected entry (`Left`/`Right` + `Enter` to confirm)

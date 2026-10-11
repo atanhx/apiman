@@ -259,7 +259,7 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
             ),
             Span::raw(" "),
             Span::styled(
-                "[e] Bulk Edit Project/Tags  [d] Delete All  [Esc] Clear",
+                "[e] Bulk Edit  [d] Delete All  [Space] Reveal  [Esc] Clear",
                 Style::default()
                     .fg(Color::White)
                     .add_modifier(Modifier::BOLD),
@@ -427,8 +427,9 @@ fn render_help_modal(frame: &mut Frame) {
         Line::from(Span::styled("  c                   Copy selected secret value to clipboard", Style::default().fg(Color::White))),
         Line::from(Span::styled("  Space / v           Toggle masked (••••) vs plaintext reveal (single entry)", Style::default().fg(Color::White))),
         Line::from(Span::styled("  Shift+Space / * / V   Reveal / mask ALL currently visible secrets", Style::default().fg(Color::White))),
-        Line::from(Span::styled("  Shift+Up / Shift+Down  Select multiple entries (group mode)", Style::default().fg(Color::White))),
-        Line::from(Span::styled("    (in group mode: e = bulk edit project/tags, d = delete all, Esc = clear)", Style::default().fg(Color::White))),
+        Line::from(Span::styled("  Shift+Up / Shift+Down  Extend group selection from cursor", Style::default().fg(Color::White))),
+        Line::from(Span::styled("  Tab                     Pin/unpin single entries anywhere, advances down (1, 4, 6...)", Style::default().fg(Color::White))),
+        Line::from(Span::styled("    (in group mode: Space = reveal marked, e = bulk edit, d = delete all, Esc = clear)", Style::default().fg(Color::White))),
         Line::from(Span::styled("  a                   Open Add Secret form modal", Style::default().fg(Color::White))),
         Line::from(Span::styled("  e                   Edit selected secret details", Style::default().fg(Color::White))),
         Line::from(Span::styled("    (in forms: Tab/Up/Down switch fields, Left/Right/Home/End move cursor)", Style::default().fg(Color::White))),

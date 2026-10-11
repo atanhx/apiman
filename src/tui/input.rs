@@ -45,6 +45,9 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) {
         KeyCode::Char('q') => {
             app.should_quit = true;
         }
+        KeyCode::Tab | KeyCode::BackTab => {
+            app.toggle_pin();
+        }
         KeyCode::Char('j') | KeyCode::Down => {
             if key.modifiers.contains(KeyModifiers::SHIFT) {
                 app.extend_selection(1);
@@ -69,11 +72,11 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) {
             app.move_selection(-10);
         }
         KeyCode::Home | KeyCode::Char('g') => {
-            app.clear_selection();
+            app.clear_range();
             app.selected_index = 0;
         }
         KeyCode::End | KeyCode::Char('G') => {
-            app.clear_selection();
+            app.clear_range();
             if !app.filtered_indices.is_empty() {
                 app.selected_index = app.filtered_indices.len() - 1;
             }
@@ -84,6 +87,8 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) {
         KeyCode::Char(' ') => {
             if key.modifiers.contains(KeyModifiers::SHIFT) {
                 app.toggle_reveal_all();
+            } else if app.in_group_mode() {
+                app.toggle_reveal_marked();
             } else {
                 app.toggle_selected_reveal();
             }

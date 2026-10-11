@@ -222,8 +222,9 @@ pub struct App {
     pub filtered_indices: Vec<usize>,
     pub selected_index: usize,
     pub revealed_entries: HashSet<String>,
-    pub marked: HashSet<usize>, // real vault indices in group-select mode
-    pub selection_anchor: Option<usize>, // filtered-list position where group select started
+    pub marked: HashSet<usize>, // real vault indices in group-select mode (pins + shift range)
+    pub pinned: HashSet<usize>, // real vault indices toggled individually with Tab
+    pub selection_anchor: Option<usize>, // filtered-list position where shift-range started
     pub search_query: TextField,
     pub project_filter: Option<String>,
     pub active_modal: ActiveModal,
@@ -243,6 +244,7 @@ impl App {
             selected_index: 0,
             revealed_entries: HashSet::new(),
             marked: HashSet::new(),
+            pinned: HashSet::new(),
             selection_anchor: None,
             search_query: TextField::default(),
             project_filter: None,
@@ -261,6 +263,7 @@ impl App {
     pub fn update_filtered_indices(&mut self) {
         // Any change to the visible list invalidates group selection.
         self.marked.clear();
+        self.pinned.clear();
         self.selection_anchor = None;
 
         let query = self.search_query.text.trim().to_lowercase();
@@ -391,7 +394,7 @@ impl App {
         if self.filtered_indices.is_empty() {
             return;
         }
-        self.clear_selection();
+        self.clear_range();
         let len = self.filtered_indices.len() as isize;
         let next = (self.selected_index as isize + delta).clamp(0, len - 1);
         self.selected_index = next as usize;
@@ -399,34 +402,91 @@ impl App {
 
     pub fn clear_selection(&mut self) {
         self.marked.clear();
+        self.pinned.clear();
         self.selection_anchor = None;
+    }
+
+    pub fn clear_range(&mut self) {
+        self.selection_anchor = None;
+        self.refresh_marked();
+    }
+
+    fn refresh_marked(&mut self) {
+        let mut marked = self.pinned.clone();
+        if let Some(anchor) = self.selection_anchor {
+            if !self.filtered_indices.is_empty() {
+                let len = self.filtered_indices.len();
+                let a = anchor.min(len - 1);
+                let c = self.selected_index.min(len - 1);
+                let (lo, hi) = if a <= c { (a, c) } else { (c, a) };
+                marked.extend(self.filtered_indices[lo..=hi].iter().copied());
+            }
+        }
+        self.marked = marked;
     }
 
     pub fn extend_selection(&mut self, delta: isize) {
         if self.filtered_indices.is_empty() {
             return;
         }
-        let len = self.filtered_indices.len();
-        let anchor = match self.selection_anchor {
-            Some(a) => a,
-            None => {
-                let a = self.selected_index;
-                self.selection_anchor = Some(a);
-                a
-            }
-        };
-        let cursor = ((self.selected_index as isize + delta).clamp(0, len as isize - 1)) as usize;
-        self.selected_index = cursor;
-        let (lo, hi) = if anchor <= cursor {
-            (anchor, cursor)
+        if self.selection_anchor.is_none() {
+            self.selection_anchor = Some(self.selected_index);
+        }
+        let len = self.filtered_indices.len() as isize;
+        let next = (self.selected_index as isize + delta).clamp(0, len - 1);
+        self.selected_index = next as usize;
+        self.refresh_marked();
+    }
+
+    pub fn toggle_pin(&mut self) {
+        if self.filtered_indices.is_empty() {
+            return;
+        }
+        let real_idx = self.filtered_indices[self.selected_index];
+        if self.pinned.contains(&real_idx) {
+            self.pinned.remove(&real_idx);
         } else {
-            (cursor, anchor)
-        };
-        self.marked = self.filtered_indices[lo..=hi].iter().copied().collect();
+            self.pinned.insert(real_idx);
+        }
+        // Advance so Tab-walking pins 1, 4, 6...; shift-range starts fresh from here.
+        let len = self.filtered_indices.len();
+        if self.selected_index + 1 < len {
+            self.selected_index += 1;
+        }
+        self.selection_anchor = None;
+        self.refresh_marked();
+        if self.marked.is_empty() {
+            self.set_status("Selection cleared");
+        } else {
+            self.set_status(format!("{} entries selected", self.marked.len()));
+        }
     }
 
     pub fn in_group_mode(&self) -> bool {
         !self.marked.is_empty()
+    }
+
+    pub fn toggle_reveal_marked(&mut self) {
+        if self.marked.is_empty() {
+            return;
+        }
+        let ids: Vec<String> = self
+            .marked
+            .iter()
+            .filter_map(|&i| self.ctx.vault.entries.get(i))
+            .map(|e| e.id.clone())
+            .collect();
+        if ids.iter().all(|id| self.revealed_entries.contains(id)) {
+            for id in &ids {
+                self.revealed_entries.remove(id);
+            }
+            self.set_status(format!("Masked {} selected secrets", ids.len()));
+        } else {
+            for id in &ids {
+                self.revealed_entries.insert(id.clone());
+            }
+            self.set_status(format!("Revealed {} selected secrets", ids.len()));
+        }
     }
 
     pub fn save_form(&mut self) -> Result<(), String> {
