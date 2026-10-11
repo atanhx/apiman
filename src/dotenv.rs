@@ -13,28 +13,32 @@ pub fn is_valid_key(key: &str) -> bool {
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.' || c == '-')
 }
 
+/// Parses `.env` text. Supports `export` prefixes, `#` comments (full-line and
+/// inline after whitespace), single/double quotes, double-quote escapes and
+/// quoted values spanning several lines. Returns entries plus the number of
+/// lines that could not be parsed.
 pub fn parse_dotenv(text: &str) -> (Vec<EnvEntry>, usize) {
+    let text = text.strip_prefix('\u{FEFF}').unwrap_or(text);
+    let lines: Vec<&str> = text.lines().collect();
     let mut entries = Vec::new();
     let mut skipped = 0;
+    let mut i = 0;
 
-    for raw_line in text.lines() {
-        // Strip a UTF-8 BOM if present on the first line.
-        let line = raw_line.trim().strip_prefix('\u{FEFF}').unwrap_or(raw_line.trim());
+    while i < lines.len() {
+        let line = lines[i].trim();
+        i += 1;
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
 
-        let line = line.strip_prefix("export ").unwrap_or(line).trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
+        let line = match line.strip_prefix("export") {
+            Some(rest) if rest.starts_with(char::is_whitespace) => rest.trim_start(),
+            _ => line,
+        };
 
-        let eq_pos = match line.find('=') {
-            Some(p) => p,
-            None => {
-                skipped += 1;
-                continue;
-            }
+        let Some(eq_pos) = line.find('=') else {
+            skipped += 1;
+            continue;
         };
 
         let key = line[..eq_pos].trim();
@@ -43,10 +47,26 @@ pub fn parse_dotenv(text: &str) -> (Vec<EnvEntry>, usize) {
             continue;
         }
 
-        let mut value = line[eq_pos + 1..].trim().to_string();
-        value = strip_inline_comment(&value);
-        value = unquote(&value);
+        let mut raw_value = line[eq_pos + 1..].to_string();
+        let opening = raw_value.trim_start().chars().next();
+        if let Some(q @ ('"' | '\'')) = opening {
+            let after_open = &raw_value.trim_start()[1..];
+            if find_closing_quote(after_open, q).is_none() {
+                // Multi-line value: only accept it when a closing quote exists,
+                // so one stray quote cannot swallow the rest of the file.
+                if let Some(end) =
+                    (i..lines.len()).find(|&j| find_closing_quote(lines[j], q).is_some())
+                {
+                    for next in &lines[i..=end] {
+                        raw_value.push('\n');
+                        raw_value.push_str(next);
+                    }
+                    i = end + 1;
+                }
+            }
+        }
 
+        let value = unquote(strip_inline_comment(&raw_value).trim());
         entries.push(EnvEntry {
             key: key.to_string(),
             value,
@@ -56,29 +76,54 @@ pub fn parse_dotenv(text: &str) -> (Vec<EnvEntry>, usize) {
     (entries, skipped)
 }
 
-fn strip_inline_comment(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    let mut chars = value.chars().peekable();
-    let mut quote: Option<char> = None;
-
-    while let Some(c) = chars.next() {
-        if let Some(q) = quote {
-            out.push(c);
-            if c == q {
-                quote = None;
-            }
-        } else if c == '"' || c == '\'' {
-            quote = Some(c);
-            out.push(c);
-        } else if c == '#' && out.ends_with(' ') {
-            out.pop();
-            break;
-        } else {
-            out.push(c);
+fn find_closing_quote(s: &str, quote: char) -> Option<usize> {
+    let mut escaped = false;
+    for (i, c) in s.char_indices() {
+        if quote == '"' && escaped {
+            escaped = false;
+            continue;
+        }
+        if quote == '"' && c == '\\' {
+            escaped = true;
+            continue;
+        }
+        if c == quote {
+            return Some(i);
         }
     }
+    None
+}
 
-    out.trim_end().to_string()
+/// Drops a `#` comment that is preceded by whitespace and not inside quotes.
+/// `KEY=abc#def` keeps the hash; `KEY=abc # note` and `KEY= # note` do not.
+fn strip_inline_comment(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+
+    for c in value.chars() {
+        if let Some(q) = quote {
+            out.push(c);
+            if escaped {
+                escaped = false;
+            } else if q == '"' && c == '\\' {
+                escaped = true;
+            } else if c == q {
+                quote = None;
+            }
+            continue;
+        }
+        if c == '#' && out.ends_with(char::is_whitespace) {
+            break;
+        }
+        // Only a quote that opens the value quotes it; `it's` stays literal.
+        if (c == '"' || c == '\'') && out.trim().is_empty() {
+            quote = Some(c);
+        }
+        out.push(c);
+    }
+
+    out
 }
 
 fn unquote(value: &str) -> String {
@@ -137,33 +182,83 @@ fn escape_double(s: &str) -> String {
 }
 
 fn needs_quotes(value: &str) -> bool {
-    if value.is_empty() {
-        return true;
-    }
-    if value != value.trim() {
+    if value.is_empty() || value != value.trim() {
         return true;
     }
     value.chars().any(|c| {
-        c.is_whitespace() || matches!(c, '#' | '"' | '\'' | '`' | '$' | '\\' | '!' | '*')
+        c.is_whitespace()
+            || matches!(
+                c,
+                '#' | '"'
+                    | '\''
+                    | '`'
+                    | '$'
+                    | '\\'
+                    | '!'
+                    | '*'
+                    | ';'
+                    | '&'
+                    | '|'
+                    | '<'
+                    | '>'
+                    | '('
+                    | ')'
+            )
     })
+}
+
+/// Quote a value for `.env` files. Single quotes are literal in shells and in
+/// every common dotenv loader, so `$`, backticks and `!` cannot expand; double
+/// quotes are only used when the value itself needs escapes.
+pub fn quote_env_value(value: &str) -> String {
+    if !needs_quotes(value) {
+        value.to_string()
+    } else if !value.contains(['\'', '\n', '\r']) {
+        format!("'{value}'")
+    } else {
+        format!("\"{}\"", escape_double(value))
+    }
+}
+
+/// POSIX shell single-quoting, safe for `eval`.
+pub fn quote_shell(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 pub fn format_env(entries: &[EnvEntry]) -> String {
     let mut out = String::from("# Exported by apiman\n");
     for e in entries {
-        if needs_quotes(&e.value) {
-            out.push_str(&format!("{}=\"{}\"\n", e.key, escape_double(&e.value)));
-        } else {
-            out.push_str(&format!("{}={}\n", e.key, e.value));
-        }
+        out.push_str(&format!("{}={}\n", e.key, quote_env_value(&e.value)));
+    }
+    out
+}
+
+pub fn format_shell(entries: &[EnvEntry]) -> String {
+    let mut out = String::new();
+    for e in entries {
+        out.push_str(&format!("export {}={}\n", e.key, quote_shell(&e.value)));
     }
     out
 }
 
 pub fn format_example(keys: &[String]) -> String {
-    let mut out = String::from("# Generated by apiman export --format example (fill in values, no secrets included)\n");
+    let mut out = String::from(
+        "# Generated by apiman export --format example (fill in values, no secrets included)\n",
+    );
     for k in keys {
         out.push_str(&format!("{k}=\n"));
+    }
+    out
+}
+
+/// `.env` file whose values are `apiman://` references: safe to commit and
+/// resolved by `apiman run --env-file`.
+pub fn format_refs(entries: &[(String, String)]) -> String {
+    let mut out = String::from(
+        "# apiman references: safe to commit, resolved by `apiman run --env-file <this file>`\n",
+    );
+    for (key, reference) in entries {
+        out.push_str(&format!("{key}={reference}\n"));
     }
     out
 }
