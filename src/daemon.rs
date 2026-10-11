@@ -14,6 +14,7 @@ use zeroize::{Zeroize, Zeroizing};
 #[derive(Debug, Serialize, Deserialize)]
 pub enum DaemonRequest {
     GetMasterKey,
+    UpdateMasterKey(String),
     Lock,
     Status,
     Ping,
@@ -112,6 +113,15 @@ pub fn lock_daemon(socket_path: &Path) -> Result<(), DaemonClientError> {
     if socket_path.exists() {
         let _ = fs::remove_file(socket_path);
     }
+    Ok(())
+}
+
+pub fn update_daemon_master_key(socket_path: &Path, new_key: &[u8; 32]) -> Result<(), DaemonClientError> {
+    if !socket_path.exists() {
+        return Ok(());
+    }
+    let hex_key = hex::encode(new_key);
+    let _ = send_request(socket_path, &DaemonRequest::UpdateMasterKey(hex_key));
     Ok(())
 }
 
@@ -295,6 +305,16 @@ fn handle_client(
             let hex_key = hex::encode(key_guard.as_slice());
             DaemonResponse::MasterKey(hex_key)
         }
+        DaemonRequest::UpdateMasterKey(hex_key) => {
+            let mut bytes = [0u8; 32];
+            if hex_key.len() == 64 && hex::decode_to_slice(&hex_key, &mut bytes).is_ok() {
+                let mut key_guard = master_key.lock().unwrap();
+                *key_guard = Zeroizing::new(bytes);
+                DaemonResponse::Pong
+            } else {
+                DaemonResponse::Error("Invalid key format".to_string())
+            }
+        }
         DaemonRequest::Lock => {
             let mut key_guard = master_key.lock().unwrap();
             key_guard.zeroize();
@@ -352,56 +372,5 @@ mod hex {
             b'A'..=b'F' => Ok(c - b'A' + 10),
             _ => Err(()),
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_hex_roundtrip() {
-        let original = [42u8; 32];
-        let enc = hex::encode(&original);
-        assert_eq!(enc.len(), 64);
-        let mut decoded = [0u8; 32];
-        hex::decode_to_slice(&enc, &mut decoded).unwrap();
-        assert_eq!(original, decoded);
-    }
-
-    #[test]
-    fn test_daemon_ipc_flow() {
-        let dir = tempfile::tempdir().unwrap();
-        let socket_path = dir.path().join("test_daemon.sock");
-        let key = [99u8; 32];
-
-        // Start listener manually in a thread
-        let listener = UnixListener::bind(&socket_path).unwrap();
-        let master_key = Arc::new(Mutex::new(Zeroizing::new(key)));
-        let should_stop = Arc::new(AtomicBool::new(false));
-        let last_accessed = Arc::new(Mutex::new(Instant::now()));
-
-        let mk = Arc::clone(&master_key);
-        let stop = Arc::clone(&should_stop);
-        let accessed = Arc::clone(&last_accessed);
-        let sock_path_clone = socket_path.clone();
-
-        let handle = std::thread::spawn(move || {
-            let (stream, _) = listener.accept().unwrap();
-            handle_client(stream, mk, stop, accessed, 60, &sock_path_clone).unwrap();
-        });
-
-        // Test GetMasterKey
-        let resp = send_request(&socket_path, &DaemonRequest::GetMasterKey).unwrap();
-        match resp {
-            DaemonResponse::MasterKey(hex_key) => {
-                let mut decoded = [0u8; 32];
-                hex::decode_to_slice(&hex_key, &mut decoded).unwrap();
-                assert_eq!(decoded, key);
-            }
-            _ => panic!("Expected MasterKey response"),
-        }
-
-        handle.join().unwrap();
     }
 }

@@ -3,6 +3,7 @@ pub mod clipboard;
 pub mod config;
 pub mod crypto;
 pub mod daemon;
+pub mod install;
 pub mod security;
 pub mod storage;
 pub mod tui;

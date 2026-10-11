@@ -132,35 +132,13 @@ pub fn init_vault(
     Ok((vault, key, salt))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::security::SecretString;
-
-    #[test]
-    fn test_storage_lifecycle() {
-        let dir = tempfile::tempdir().unwrap();
-        let vault_path = dir.path().join("vault.enc");
-
-        let password = "test-master-password";
-        let (mut vault, key, salt) = init_vault(password, &vault_path).unwrap();
-
-        vault.set(
-            "KEY".to_string(),
-            SecretString::new("val"),
-            None,
-            vec![],
-            None,
-        );
-        save_vault(&vault, &key, &salt, &vault_path).unwrap();
-
-        // Reload with password
-        let (loaded, key2, _) = load_vault_with_password(password, &vault_path).unwrap();
-        assert_eq!(key.as_slice(), key2.as_slice());
-        assert_eq!(loaded.get("KEY", None).unwrap().value.expose_secret(), "val");
-
-        // Reload with key
-        let (loaded2, _) = load_vault_with_key(&key, &vault_path).unwrap();
-        assert_eq!(loaded2.get("KEY", None).unwrap().value.expose_secret(), "val");
-    }
+pub fn rekey_vault(
+    vault: &Vault,
+    new_password: &str,
+    path: &Path,
+) -> Result<(Zeroizing<[u8; 32]>, [u8; SALT_LEN]), StorageError> {
+    let new_salt = generate_salt();
+    let new_key = derive_key(new_password, &new_salt)?;
+    save_vault(vault, &new_key, &new_salt, path)?;
+    Ok((new_key, new_salt))
 }

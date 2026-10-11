@@ -7,6 +7,12 @@ use ratatui::{
     Frame,
 };
 
+const ACCENT_ORANGE: Color = Color::Rgb(255, 130, 40);
+const ACCENT_RED: Color = Color::Rgb(235, 60, 50);
+const ACCENT_AMBER: Color = Color::Rgb(255, 190, 70);
+const BORDER_WARM: Color = Color::Rgb(140, 80, 65);
+const ROW_HIGHLIGHT_BG: Color = Color::Rgb(55, 25, 20);
+
 pub fn render(frame: &mut Frame, app: &App) {
     let size = frame.area();
 
@@ -41,21 +47,21 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
             " APIMAN ",
             Style::default()
                 .fg(Color::Black)
-                .bg(Color::Cyan)
+                .bg(ACCENT_ORANGE)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled("  Vault: ", Style::default().fg(Color::White)),
         Span::styled(
             app.ctx.vault_path.display().to_string(),
             Style::default()
-                .fg(Color::Yellow)
+                .fg(ACCENT_AMBER)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(" | Scope: ", Style::default().fg(Color::White)),
         Span::styled(
             format!("[{proj_label}]"),
             Style::default()
-                .fg(Color::Cyan)
+                .fg(ACCENT_ORANGE)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(" | Entries: ", Style::default().fg(Color::White)),
@@ -69,14 +75,14 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
         Span::styled(
             "Unlocked",
             Style::default()
-                .fg(Color::LightGreen)
+                .fg(ACCENT_AMBER)
                 .add_modifier(Modifier::BOLD),
         ),
     ])];
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Rgb(120, 140, 160)));
+        .border_style(Style::default().fg(BORDER_WARM));
 
     let paragraph = Paragraph::new(header_text).block(block);
     frame.render_widget(paragraph, area);
@@ -89,7 +95,7 @@ fn render_table(frame: &mut Frame, app: &App, area: Rect) {
             Span::styled(
                 *h,
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(ACCENT_ORANGE)
                     .add_modifier(Modifier::BOLD),
             )
         });
@@ -120,7 +126,7 @@ fn render_table(frame: &mut Frame, app: &App, area: Rect) {
 
             let style = if is_selected {
                 Style::default()
-                    .bg(Color::Rgb(35, 55, 80))
+                    .bg(ROW_HIGHLIGHT_BG)
                     .fg(Color::White)
                     .add_modifier(Modifier::BOLD)
             } else {
@@ -138,7 +144,7 @@ fn render_table(frame: &mut Frame, app: &App, area: Rect) {
                     name_cell,
                     if is_selected {
                         Style::default()
-                            .fg(Color::White)
+                            .fg(ACCENT_ORANGE)
                             .add_modifier(Modifier::BOLD)
                     } else {
                         Style::default().fg(Color::White)
@@ -150,7 +156,7 @@ fn render_table(frame: &mut Frame, app: &App, area: Rect) {
                         Style::default().fg(Color::White)
                     } else {
                         Style::default()
-                            .fg(Color::Yellow)
+                            .fg(ACCENT_RED)
                             .add_modifier(Modifier::BOLD)
                     },
                 ),
@@ -158,13 +164,13 @@ fn render_table(frame: &mut Frame, app: &App, area: Rect) {
                     val_str,
                     if is_revealed {
                         Style::default()
-                            .fg(Color::LightGreen)
+                            .fg(ACCENT_AMBER)
                             .add_modifier(Modifier::BOLD)
                     } else {
                         Style::default().fg(Color::White)
                     },
                 ),
-                Span::styled(tags_str, Style::default().fg(Color::Cyan)),
+                Span::styled(tags_str, Style::default().fg(ACCENT_ORANGE)),
                 Span::styled(desc_str, Style::default().fg(Color::White)),
             ];
 
@@ -182,11 +188,11 @@ fn render_table(frame: &mut Frame, app: &App, area: Rect) {
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Rgb(120, 140, 160)))
+        .border_style(Style::default().fg(BORDER_WARM))
         .title(Span::styled(
             " Secrets Catalog ",
             Style::default()
-                .fg(Color::Cyan)
+                .fg(ACCENT_ORANGE)
                 .add_modifier(Modifier::BOLD),
         ));
 
@@ -201,7 +207,7 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
                 " SEARCH: ",
                 Style::default()
                     .fg(Color::Black)
-                    .bg(Color::Yellow)
+                    .bg(ACCENT_ORANGE)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw(" "),
@@ -211,7 +217,7 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
                     .fg(Color::White)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled("█", Style::default().fg(Color::Yellow)),
+            Span::styled("█", Style::default().fg(ACCENT_ORANGE)),
             Span::styled(
                 "  [Enter] Confirm | [Esc] Clear",
                 Style::default().fg(Color::White),
@@ -223,7 +229,7 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
                 " INFO: ",
                 Style::default()
                     .fg(Color::Black)
-                    .bg(Color::LightGreen)
+                    .bg(ACCENT_ORANGE)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw(" "),
@@ -239,7 +245,7 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
             Span::styled(
                 format!(" Filter: '{}' (Esc to clear) ", app.search_query),
                 Style::default()
-                    .fg(Color::Yellow)
+                    .fg(ACCENT_ORANGE)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw(" | "),
@@ -253,70 +259,70 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
             Span::styled(
                 "[Ctrl+K]",
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(ACCENT_ORANGE)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(" Help ", Style::default().fg(Color::White)),
             Span::styled(
                 "[Ctrl+F]",
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(ACCENT_ORANGE)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(" Search ", Style::default().fg(Color::White)),
             Span::styled(
                 "[c]",
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(ACCENT_ORANGE)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(" Copy ", Style::default().fg(Color::White)),
             Span::styled(
                 "[Space]",
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(ACCENT_ORANGE)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(" Reveal ", Style::default().fg(Color::White)),
             Span::styled(
                 "[a]",
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(ACCENT_ORANGE)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(" Add ", Style::default().fg(Color::White)),
             Span::styled(
                 "[e]",
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(ACCENT_ORANGE)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(" Edit ", Style::default().fg(Color::White)),
             Span::styled(
                 "[d]",
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(ACCENT_ORANGE)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(" Del ", Style::default().fg(Color::White)),
             Span::styled(
                 "[p]",
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(ACCENT_ORANGE)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(" Scope ", Style::default().fg(Color::White)),
             Span::styled(
                 "[l]",
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(ACCENT_ORANGE)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(" Lock ", Style::default().fg(Color::White)),
             Span::styled(
                 "[q]",
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(ACCENT_ORANGE)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(" Quit", Style::default().fg(Color::White)),
@@ -325,21 +331,21 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
 
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Rgb(120, 140, 160)));
+        .border_style(Style::default().fg(BORDER_WARM));
 
     let paragraph = Paragraph::new(content).block(block);
     frame.render_widget(paragraph, area);
 }
 
 fn render_help_modal(frame: &mut Frame) {
-    let area = centered_rect(60, 65, frame.area());
+    let area = centered_rect(62, 70, frame.area());
     frame.render_widget(Clear, area);
 
     let shortcuts = vec![
         Line::from(vec![Span::styled(
             "Navigation & Search",
             Style::default()
-                .fg(Color::Cyan)
+                .fg(ACCENT_ORANGE)
                 .add_modifier(Modifier::BOLD),
         )]),
         Line::from(Span::styled("  j / Down       Move selection down", Style::default().fg(Color::White))),
@@ -351,7 +357,7 @@ fn render_help_modal(frame: &mut Frame) {
         Line::from(vec![Span::styled(
             "Secret Actions",
             Style::default()
-                .fg(Color::Cyan)
+                .fg(ACCENT_ORANGE)
                 .add_modifier(Modifier::BOLD),
         )]),
         Line::from(Span::styled("  c              Copy selected secret value to clipboard", Style::default().fg(Color::White))),
@@ -361,19 +367,20 @@ fn render_help_modal(frame: &mut Frame) {
         Line::from(Span::styled("  d              Delete selected secret (with confirmation)", Style::default().fg(Color::White))),
         Line::from(""),
         Line::from(vec![Span::styled(
-            "Session Management",
+            "Session & Password Management",
             Style::default()
-                .fg(Color::Cyan)
+                .fg(ACCENT_ORANGE)
                 .add_modifier(Modifier::BOLD),
         )]),
         Line::from(Span::styled("  l              Lock vault and terminate background daemon", Style::default().fg(Color::White))),
+        Line::from(Span::styled("  apiman passwd  Change master password (run from shell)", Style::default().fg(ACCENT_AMBER))),
         Line::from(Span::styled("  Ctrl+K or ?    Show this help modal", Style::default().fg(Color::White))),
         Line::from(Span::styled("  q / Ctrl+C     Exit TUI (session remains unlocked until auto-lock)", Style::default().fg(Color::White))),
         Line::from(""),
         Line::from(vec![Span::styled(
             "Press [Esc] or [Enter] to close help",
             Style::default()
-                .fg(Color::Yellow)
+                .fg(ACCENT_ORANGE)
                 .add_modifier(Modifier::BOLD),
         )]),
     ];
@@ -382,7 +389,7 @@ fn render_help_modal(frame: &mut Frame) {
         .title(" Keybindings Reference ")
         .title_alignment(Alignment::Center)
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan));
+        .border_style(Style::default().fg(ACCENT_ORANGE).add_modifier(Modifier::BOLD));
 
     let paragraph = Paragraph::new(shortcuts).block(block);
     frame.render_widget(paragraph, area);
@@ -513,35 +520,35 @@ fn render_form_modal(frame: &mut Frame, app: &App) {
         Span::styled(
             "[Tab/Down]",
             Style::default()
-                .fg(Color::Cyan)
+                .fg(ACCENT_ORANGE)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(" Next | ", Style::default().fg(Color::White)),
         Span::styled(
             "[Shift+Tab/Up]",
             Style::default()
-                .fg(Color::Cyan)
+                .fg(ACCENT_ORANGE)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(" Prev | ", Style::default().fg(Color::White)),
         Span::styled(
             "[Ctrl+V]",
             Style::default()
-                .fg(Color::Yellow)
+                .fg(ACCENT_AMBER)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(" Mask/Reveal | ", Style::default().fg(Color::White)),
         Span::styled(
             "[Ctrl+S/Enter]",
             Style::default()
-                .fg(Color::LightGreen)
+                .fg(ACCENT_ORANGE)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(" Save | ", Style::default().fg(Color::White)),
         Span::styled(
             "[Esc]",
             Style::default()
-                .fg(Color::Red)
+                .fg(ACCENT_RED)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(" Cancel", Style::default().fg(Color::White)),
@@ -555,12 +562,12 @@ fn render_form_modal(frame: &mut Frame, app: &App) {
         .title(Span::styled(
             title,
             Style::default()
-                .fg(Color::Cyan)
+                .fg(ACCENT_ORANGE)
                 .add_modifier(Modifier::BOLD),
         ))
         .title_alignment(Alignment::Center)
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD));
+        .border_style(Style::default().fg(ACCENT_ORANGE).add_modifier(Modifier::BOLD));
     frame.render_widget(outer_block, area);
 }
 
@@ -570,13 +577,13 @@ fn field_block(title: &'static str, is_active: bool) -> Block<'static> {
             .title(Span::styled(
                 title,
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(ACCENT_ORANGE)
                     .add_modifier(Modifier::BOLD),
             ))
             .borders(Borders::ALL)
             .border_style(
                 Style::default()
-                    .fg(Color::Cyan)
+                    .fg(ACCENT_ORANGE)
                     .add_modifier(Modifier::BOLD),
             )
     } else {
@@ -586,7 +593,7 @@ fn field_block(title: &'static str, is_active: bool) -> Block<'static> {
                 Style::default().fg(Color::White),
             ))
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(Color::Rgb(140, 150, 160)))
+            .border_style(Style::default().fg(BORDER_WARM))
     }
 }
 
@@ -612,7 +619,7 @@ fn render_delete_modal(frame: &mut Frame, app: &App) {
             Span::styled(
                 name,
                 Style::default()
-                    .fg(Color::Yellow)
+                    .fg(ACCENT_ORANGE)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled("' ?", Style::default().fg(Color::White)),
@@ -623,7 +630,7 @@ fn render_delete_modal(frame: &mut Frame, app: &App) {
                 " [y] Confirm Delete ",
                 Style::default()
                     .fg(Color::White)
-                    .bg(Color::Red)
+                    .bg(ACCENT_RED)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::raw("   "),
@@ -637,11 +644,11 @@ fn render_delete_modal(frame: &mut Frame, app: &App) {
     let block = Block::default()
         .title(Span::styled(
             " Confirm Deletion ",
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            Style::default().fg(ACCENT_RED).add_modifier(Modifier::BOLD),
         ))
         .title_alignment(Alignment::Center)
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Red));
+        .border_style(Style::default().fg(ACCENT_RED).add_modifier(Modifier::BOLD));
 
     let paragraph = Paragraph::new(text).alignment(Alignment::Center).block(block);
     frame.render_widget(paragraph, area);

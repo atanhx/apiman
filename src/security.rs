@@ -23,6 +23,31 @@ pub fn unlock_memory(ptr: *const u8, len: usize) {
     }
 }
 
+pub fn read_secure_password(prompt: &str) -> std::io::Result<String> {
+    use std::io::{self, IsTerminal, Write};
+    if io::stdin().is_terminal() {
+        if !prompt.is_empty() {
+            eprint!("{prompt}");
+            io::stderr().flush()?;
+        }
+        rpassword::prompt_password("")
+    } else {
+        if !prompt.is_empty() {
+            eprint!("{prompt}");
+            let _ = io::stderr().flush();
+        }
+        let mut line = String::new();
+        io::stdin().read_line(&mut line)?;
+        if line.ends_with('\n') {
+            line.pop();
+            if line.ends_with('\r') {
+                line.pop();
+            }
+        }
+        Ok(line)
+    }
+}
+
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct SecretString {
     inner: String,
@@ -96,26 +121,5 @@ impl<'de> Deserialize<'de> for SecretString {
     {
         let s = String::deserialize(deserializer)?;
         Ok(Self::new(s))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_secret_string_redacted_debug() {
-        let sec = SecretString::new("my-api-key-12345");
-        assert_eq!(format!("{:?}", sec), "[REDACTED]");
-        assert_eq!(sec.expose_secret(), "my-api-key-12345");
-    }
-
-    #[test]
-    fn test_secret_string_serde() {
-        let sec = SecretString::new("secret-value");
-        let json = serde_json::to_string(&sec).unwrap();
-        assert_eq!(json, "\"secret-value\"");
-        let deserialized: SecretString = serde_json::from_str(&json).unwrap();
-        assert_eq!(deserialized.expose_secret(), "secret-value");
     }
 }

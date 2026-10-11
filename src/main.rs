@@ -1,9 +1,9 @@
 use apiman::cli::{handle_cli, load_session, Cli, Commands};
 use apiman::config::Config;
+use apiman::security::read_secure_password;
 use apiman::storage::init_vault;
 use apiman::tui::run_tui;
 use clap::Parser;
-use rpassword::prompt_password;
 use std::io::{self, IsTerminal, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -79,17 +79,13 @@ fn interactive_init(
     vault_path: &PathBuf,
     config: &Config,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    eprint!("Enter new master password: ");
-    io::stderr().flush()?;
-    let mut pw1 = prompt_password("")?;
+    let mut pw1 = read_secure_password("Enter new master password: ")?;
 
     if pw1.is_empty() {
         return Err("Password cannot be empty".into());
     }
 
-    eprint!("Confirm master password: ");
-    io::stderr().flush()?;
-    let mut pw2 = prompt_password("")?;
+    let mut pw2 = read_secure_password("Confirm master password: ")?;
 
     if pw1 != pw2 {
         pw1.zeroize();
