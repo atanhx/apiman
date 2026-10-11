@@ -1,18 +1,26 @@
 use crate::cli::SessionContext;
-use crate::clipboard::copy_to_clipboard;
+use crate::config::expand_path;
 use crate::dotenv::parse_dotenv;
 use crate::security::SecretString;
-use crate::vault::SecretEntry;
-use std::collections::HashSet;
+use crate::tui::keymap::Keymap;
+use crate::tui::theme::Theme;
+use crate::vault::{
+    SecretEntry, Vault, normalize_project, normalize_tags, same_project, validate_secret_name,
+};
+use std::cell::Cell;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
+use zeroize::Zeroize;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ActiveModal {
     None,
     Add,
-    Edit(usize),
+    /// Entry id being edited.
+    Edit(String),
     BulkEdit,
-    DeleteConfirm(usize),
+    /// Entry ids to delete, captured when the dialog opened.
+    DeleteConfirm(Vec<String>),
     KeybindingsHelp,
     Search,
     Import,
@@ -31,10 +39,24 @@ impl TextField {
         Self { text, cursor }
     }
 
+    pub fn len(&self) -> usize {
+        self.text.chars().count()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.text.is_empty()
+    }
+
     pub fn insert_char(&mut self, c: char) {
         let byte_idx = char_to_byte_idx(&self.text, self.cursor);
         self.text.insert(byte_idx, c);
         self.cursor += 1;
+    }
+
+    pub fn insert_str(&mut self, s: &str) {
+        for c in s.chars() {
+            self.insert_char(c);
+        }
     }
 
     pub fn backspace(&mut self) {
@@ -47,22 +69,37 @@ impl TextField {
     }
 
     pub fn delete_at_cursor(&mut self) {
-        let total = self.text.chars().count();
-        if self.cursor >= total {
+        if self.cursor >= self.len() {
             return;
         }
         let byte_idx = char_to_byte_idx(&self.text, self.cursor);
         self.text.remove(byte_idx);
     }
 
-    pub fn move_left(&mut self) {
-        if self.cursor > 0 {
-            self.cursor -= 1;
+    pub fn delete_word_back(&mut self) {
+        while self.cursor > 0 && self.char_before().is_some_and(char::is_whitespace) {
+            self.backspace();
+        }
+        while self.cursor > 0 && self.char_before().is_some_and(|c| !c.is_whitespace()) {
+            self.backspace();
         }
     }
 
+    fn char_before(&self) -> Option<char> {
+        self.text.chars().nth(self.cursor.checked_sub(1)?)
+    }
+
+    pub fn clear(&mut self) {
+        self.text.zeroize();
+        self.cursor = 0;
+    }
+
+    pub fn move_left(&mut self) {
+        self.cursor = self.cursor.saturating_sub(1);
+    }
+
     pub fn move_right(&mut self) {
-        if self.cursor < self.text.chars().count() {
+        if self.cursor < self.len() {
             self.cursor += 1;
         }
     }
@@ -72,33 +109,13 @@ impl TextField {
     }
 
     pub fn move_end(&mut self) {
-        self.cursor = self.text.chars().count();
+        self.cursor = self.len();
     }
 
-    pub fn clamp_cursor(&mut self) {
-        let total = self.text.chars().count();
-        if self.cursor > total {
-            self.cursor = total;
-        }
-    }
-
-    pub fn with_cursor_marker(&self, mask: bool) -> String {
-        let display = if mask {
-            "*".repeat(self.text.chars().count())
-        } else {
-            self.text.clone()
-        };
-        let mut out = String::with_capacity(display.len() + 1);
-        for (i, c) in display.chars().enumerate() {
-            if i == self.cursor {
-                out.push('█');
-            }
-            out.push(c);
-        }
-        if self.cursor >= display.chars().count() {
-            out.push('█');
-        }
-        out
+    pub fn set(&mut self, text: String) {
+        self.text.zeroize();
+        self.text = text;
+        self.move_end();
     }
 }
 
@@ -106,7 +123,7 @@ fn char_to_byte_idx(s: &str, char_idx: usize) -> usize {
     s.char_indices()
         .nth(char_idx)
         .map(|(i, _)| i)
-        .unwrap_or_else(|| s.len())
+        .unwrap_or(s.len())
 }
 
 #[derive(Debug, Clone, Default)]
@@ -119,6 +136,9 @@ pub struct FormState {
     pub active_field: usize, // 0: Name, 1: Project, 2: Value, 3: Tags, 4: Description
     pub show_secret: bool,
 }
+
+pub const FORM_FIELDS: usize = 5;
+pub const FORM_VALUE_FIELD: usize = 2;
 
 impl FormState {
     pub fn from_entry(entry: &SecretEntry) -> Self {
@@ -144,17 +164,28 @@ impl FormState {
     }
 
     pub fn next_field(&mut self) {
-        self.active_field = (self.active_field + 1) % 5;
+        self.active_field = (self.active_field + 1) % FORM_FIELDS;
         self.active_field_mut().move_end();
     }
 
     pub fn prev_field(&mut self) {
-        self.active_field = if self.active_field == 0 {
-            4
-        } else {
-            self.active_field - 1
-        };
+        self.active_field = (self.active_field + FORM_FIELDS - 1) % FORM_FIELDS;
         self.active_field_mut().move_end();
+    }
+
+    /// Zeroes every field (the secret value above all) when a form closes.
+    pub fn wipe(&mut self) {
+        for f in [
+            &mut self.name,
+            &mut self.project,
+            &mut self.value,
+            &mut self.tags,
+            &mut self.description,
+        ] {
+            f.clear();
+        }
+        self.active_field = 0;
+        self.show_secret = false;
     }
 }
 
@@ -162,15 +193,8 @@ impl FormState {
 pub struct PathFormState {
     pub path: TextField,
     pub project: TextField,
-    pub active_field: usize, // 0: Path, 1: Project
+    pub active_field: usize, // 0: Path, 1: Project (import) / Format (export)
     pub export_example: bool,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct BulkFormState {
-    pub project: TextField,
-    pub tags: TextField,
-    pub active_field: usize, // 0: Project, 1: Tags
 }
 
 impl PathFormState {
@@ -188,13 +212,16 @@ impl PathFormState {
     }
 
     pub fn prev_field(&mut self, max: usize) {
-        self.active_field = if self.active_field == 0 {
-            max - 1
-        } else {
-            self.active_field - 1
-        };
+        self.active_field = (self.active_field + max - 1) % max;
         self.active_field_mut().move_end();
     }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct BulkFormState {
+    pub project: TextField,
+    pub tags: TextField,
+    pub active_field: usize, // 0: Project, 1: Tags
 }
 
 impl BulkFormState {
@@ -212,19 +239,36 @@ impl BulkFormState {
     }
 
     pub fn prev_field(&mut self) {
-        self.active_field = if self.active_field == 0 { 1 } else { 0 };
-        self.active_field_mut().move_end();
+        self.next_field();
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToastKind {
+    Info,
+    Success,
+    Error,
+}
+
+const TOAST_TTL: Duration = Duration::from_secs(5);
+const KEEPALIVE_EVERY: Duration = Duration::from_secs(30);
+const DISK_CHECK_EVERY: Duration = Duration::from_secs(1);
+
 pub struct App {
     pub ctx: SessionContext,
+    pub keymap: Keymap,
+    pub theme: Theme,
     pub filtered_indices: Vec<usize>,
     pub selected_index: usize,
+    /// First visible row of the table, persisted across frames for smooth scrolling.
+    pub table_offset: Cell<usize>,
     pub revealed_entries: HashSet<String>,
-    pub marked: HashSet<usize>, // real vault indices in group-select mode (pins + shift range)
-    pub pinned: HashSet<usize>, // real vault indices toggled individually with Tab
-    pub selection_anchor: Option<usize>, // filtered-list position where shift-range started
+    /// Entry ids in the group selection (pins + active shift range).
+    pub marked: HashSet<String>,
+    /// Entry ids pinned individually with Tab or committed from a range.
+    pub pinned: HashSet<String>,
+    /// Filtered-list position where the active shift-range started.
+    pub selection_anchor: Option<usize>,
     pub search_query: TextField,
     pub project_filter: Option<String>,
     pub active_modal: ActiveModal,
@@ -232,16 +276,29 @@ pub struct App {
     pub path_form: PathFormState,
     pub bulk_form: BulkFormState,
     pub delete_choice_delete: bool,
-    pub status_message: Option<(String, Instant)>,
+    pub help_scroll: u16,
+    pub status_message: Option<(String, ToastKind, Instant)>,
     pub should_quit: bool,
+    /// Printed after the terminal is restored (lock / auto-lock notices).
+    pub exit_message: Option<String>,
+    pub last_activity: Instant,
+    last_keepalive: Instant,
+    last_disk_check: Instant,
 }
 
 impl App {
     pub fn new(ctx: SessionContext) -> Self {
+        let (keymap, mut problems) = Keymap::from_config(&ctx.config.keybindings);
+        let (theme, theme_problem) = Theme::from_config(&ctx.config.theme);
+        problems.extend(theme_problem);
+        let now = Instant::now();
         let mut app = Self {
             ctx,
+            keymap,
+            theme,
             filtered_indices: Vec::new(),
             selected_index: 0,
+            table_offset: Cell::new(0),
             revealed_entries: HashSet::new(),
             marked: HashSet::new(),
             pinned: HashSet::new(),
@@ -252,142 +309,259 @@ impl App {
             form_state: FormState::default(),
             path_form: PathFormState::default(),
             bulk_form: BulkFormState::default(),
-            delete_choice_delete: true,
+            delete_choice_delete: false,
+            help_scroll: 0,
             status_message: None,
             should_quit: false,
+            exit_message: None,
+            last_activity: now,
+            last_keepalive: now,
+            last_disk_check: now,
         };
-        app.update_filtered_indices();
+        app.recompute(None);
+        if !problems.is_empty() {
+            app.set_error(format!(
+                "config.json: {} (run 'apiman keys')",
+                problems.join("; ")
+            ));
+        }
         app
     }
 
-    pub fn update_filtered_indices(&mut self) {
-        // Any change to the visible list invalidates group selection.
-        self.marked.clear();
-        self.pinned.clear();
-        self.selection_anchor = None;
+    fn entry_matches(&self, entry: &SecretEntry, query: &str) -> bool {
+        if let Some(p) = self.project_filter.as_deref() {
+            if p == "global" {
+                if !entry.is_global() {
+                    return false;
+                }
+            } else if !entry.in_scope(Some(p)) {
+                return false;
+            }
+        }
+        if query.is_empty() {
+            return true;
+        }
+        entry.name.to_lowercase().contains(query)
+            || entry.project_display().to_lowercase().contains(query)
+            || entry.tags.iter().any(|t| t.to_lowercase().contains(query))
+            || entry
+                .description
+                .as_deref()
+                .is_some_and(|d| d.to_lowercase().contains(query))
+    }
 
+    /// Rebuilds the visible list after the vault or filters changed, keeping
+    /// the cursor on `focus` (an entry id) when it is still visible and
+    /// dropping selections of entries that no longer exist.
+    pub fn recompute(&mut self, focus: Option<String>) {
         let query = self.search_query.text.trim().to_lowercase();
-        let proj_filter = self.project_filter.as_deref();
+        self.filtered_indices = (0..self.ctx.vault.entries.len())
+            .filter(|&i| self.entry_matches(&self.ctx.vault.entries[i], &query))
+            .collect();
 
-        self.filtered_indices = self
+        let existing: HashSet<&str> = self
             .ctx
             .vault
             .entries
             .iter()
-            .enumerate()
-            .filter(|(_, entry)| {
-                if let Some(p) = proj_filter {
-                    if p != "all" {
-                        if p == "global" {
-                            if !entry.is_global() {
-                                return false;
-                            }
-                        } else if entry.project.as_deref() != Some(p) {
-                            return false;
-                        }
-                    }
-                }
-
-                if !query.is_empty() {
-                    let matches_name = entry.name.to_lowercase().contains(&query);
-                    let matches_proj = entry.project_display().to_lowercase().contains(&query);
-                    let matches_tags = entry
-                        .tags
-                        .iter()
-                        .any(|t| t.to_lowercase().contains(&query));
-                    let matches_desc = entry
-                        .description
-                        .as_deref()
-                        .unwrap_or("")
-                        .to_lowercase()
-                        .contains(&query);
-
-                    if !matches_name && !matches_proj && !matches_tags && !matches_desc {
-                        return false;
-                    }
-                }
-
-                true
-            })
-            .map(|(i, _)| i)
+            .map(|e| e.id.as_str())
             .collect();
+        self.pinned.retain(|id| existing.contains(id.as_str()));
+        self.revealed_entries
+            .retain(|id| existing.contains(id.as_str()));
 
+        if let Some(id) = focus
+            && let Some(pos) = self
+                .filtered_indices
+                .iter()
+                .position(|&i| self.ctx.vault.entries[i].id == id)
+        {
+            self.selected_index = pos;
+        }
         if self.filtered_indices.is_empty() {
             self.selected_index = 0;
         } else if self.selected_index >= self.filtered_indices.len() {
             self.selected_index = self.filtered_indices.len() - 1;
         }
+        if self
+            .selection_anchor
+            .is_some_and(|a| a >= self.filtered_indices.len())
+        {
+            self.selection_anchor = None;
+        }
+        self.refresh_marked();
+    }
+
+    /// Filter/search changed: the group selection no longer applies.
+    pub fn update_filtered_indices(&mut self) {
+        let focus = self.selected_id();
+        self.clear_selection();
+        self.recompute(focus);
     }
 
     pub fn selected_entry(&self) -> Option<&SecretEntry> {
-        if self.filtered_indices.is_empty() {
-            return None;
-        }
-        let real_idx = self.filtered_indices[self.selected_index];
-        self.ctx.vault.entries.get(real_idx)
+        self.filtered_indices
+            .get(self.selected_index)
+            .and_then(|&i| self.ctx.vault.entries.get(i))
+    }
+
+    pub fn selected_id(&self) -> Option<String> {
+        self.selected_entry().map(|e| e.id.clone())
+    }
+
+    pub fn visible_entries(&self) -> impl Iterator<Item = &SecretEntry> {
+        self.filtered_indices
+            .iter()
+            .filter_map(|&i| self.ctx.vault.entries.get(i))
+    }
+
+    pub fn marked_entries(&self) -> Vec<&SecretEntry> {
+        self.ctx
+            .vault
+            .entries
+            .iter()
+            .filter(|e| self.marked.contains(&e.id))
+            .collect()
+    }
+
+    fn toast(&mut self, msg: impl Into<String>, kind: ToastKind) {
+        self.status_message = Some((msg.into(), kind, Instant::now()));
     }
 
     pub fn set_status(&mut self, msg: impl Into<String>) {
-        self.status_message = Some((msg.into(), Instant::now()));
+        self.toast(msg, ToastKind::Info);
+    }
+
+    pub fn set_success(&mut self, msg: impl Into<String>) {
+        self.toast(msg, ToastKind::Success);
+    }
+
+    pub fn set_error(&mut self, msg: impl Into<String>) {
+        self.toast(msg, ToastKind::Error);
+    }
+
+    pub fn status(&self) -> Option<(&str, ToastKind)> {
+        match &self.status_message {
+            Some((msg, kind, at))
+                if at.elapsed() < TOAST_TTL
+                    || *kind == ToastKind::Error && at.elapsed() < TOAST_TTL * 2 =>
+            {
+                Some((msg.as_str(), *kind))
+            }
+            _ => None,
+        }
     }
 
     pub fn status_text(&self) -> Option<&str> {
-        if let Some((msg, time)) = &self.status_message {
-            if time.elapsed() < Duration::from_secs(4) {
-                return Some(msg.as_str());
-            }
+        self.status().map(|(m, _)| m)
+    }
+
+    /// Seconds until the TUI locks itself for inactivity, if auto-lock is on.
+    pub fn lock_countdown(&self) -> Option<u64> {
+        let timeout = self.ctx.config.auto_lock_timeout_seconds;
+        (timeout > 0).then(|| timeout.saturating_sub(self.last_activity.elapsed().as_secs()))
+    }
+
+    pub fn note_activity(&mut self) {
+        self.last_activity = Instant::now();
+        if self.last_keepalive.elapsed() >= KEEPALIVE_EVERY {
+            self.last_keepalive = Instant::now();
+            // Keep the shared session alive while the user is working here.
+            let _ = crate::daemon::touch_daemon(&self.ctx.socket_path);
         }
-        None
+    }
+
+    /// Periodic housekeeping: inactivity auto-lock and picking up vault
+    /// changes made by other apiman processes.
+    pub fn tick(&mut self) {
+        if let Some(0) = self.lock_countdown() {
+            let timeout = self.ctx.config.auto_lock_timeout_seconds;
+            self.should_quit = true;
+            self.exit_message = Some(format!(
+                "apiman locked after {} of inactivity.",
+                crate::cli::format_duration_short(timeout)
+            ));
+            return;
+        }
+        if self.last_disk_check.elapsed() >= DISK_CHECK_EVERY {
+            self.last_disk_check = Instant::now();
+            self.reload_from_disk();
+        }
+    }
+
+    pub fn reload_from_disk(&mut self) {
+        let focus = self.selected_id();
+        match self.ctx.reload_if_changed() {
+            Ok(true) => {
+                self.recompute(focus);
+                self.set_status("Vault changed outside this window; reloaded");
+            }
+            Ok(false) => {}
+            Err(e) => self.set_error(e),
+        }
+    }
+
+    /// Runs a vault mutation through the locked reload-modify-save cycle and
+    /// refreshes the view, keeping the cursor on `focus`.
+    fn commit<R>(
+        &mut self,
+        focus: Option<String>,
+        mutate: impl FnOnce(&mut Vault) -> Result<R, String>,
+    ) -> Result<R, String> {
+        let out = self.ctx.update(mutate)?;
+        self.recompute(focus);
+        Ok(out)
     }
 
     pub fn copy_selected_secret(&mut self) {
-        if let Some(entry) = self.selected_entry() {
-            let secret_val = entry.value.expose_secret();
-            let name = entry.name.clone();
-            match copy_to_clipboard(secret_val) {
-                Ok(_) => {
-                    self.set_status(format!("Copied '{name}' to clipboard"));
-                }
-                Err(e) => {
-                    self.set_status(format!("Copy failed: {e}"));
-                }
+        let Some(entry) = self.selected_entry() else {
+            return;
+        };
+        let name = entry.name.clone();
+        let result = crate::clipboard::copy_secret(
+            entry.value.expose_secret(),
+            self.ctx.config.clipboard_timeout_seconds,
+        );
+        match result {
+            Ok(note) => self.set_success(format!("Copied '{name}' ({note})")),
+            Err(e) => self.set_error(e),
+        }
+    }
+
+    fn toggle_reveal(&mut self, ids: Vec<String>, label: &str) {
+        if ids.is_empty() {
+            self.set_status("Nothing to reveal");
+            return;
+        }
+        let n = ids.len();
+        if ids.iter().all(|id| self.revealed_entries.contains(id)) {
+            for id in &ids {
+                self.revealed_entries.remove(id);
+            }
+            if n > 1 {
+                self.set_status(format!("Masked {n} {label}"));
+            }
+        } else {
+            self.revealed_entries.extend(ids);
+            if n > 1 {
+                self.set_status(format!("Revealed {n} {label}"));
             }
         }
     }
 
     pub fn toggle_selected_reveal(&mut self) {
-        if let Some(entry) = self.selected_entry() {
-            let id = entry.id.clone();
-            if self.revealed_entries.contains(&id) {
-                self.revealed_entries.remove(&id);
-            } else {
-                self.revealed_entries.insert(id);
-            }
-        }
+        let ids = self.selected_id().into_iter().collect();
+        self.toggle_reveal(ids, "secret");
     }
 
     pub fn toggle_reveal_all(&mut self) {
-        let ids: Vec<String> = self
-            .filtered_indices
-            .iter()
-            .filter_map(|&i| self.ctx.vault.entries.get(i))
-            .map(|e| e.id.clone())
-            .collect();
-        if ids.is_empty() {
-            self.set_status("No entries to reveal");
-            return;
-        }
-        if ids.iter().all(|id| self.revealed_entries.contains(id)) {
-            for id in &ids {
-                self.revealed_entries.remove(id);
-            }
-            self.set_status("Masked all visible secrets");
-        } else {
-            for id in &ids {
-                self.revealed_entries.insert(id.clone());
-            }
-            self.set_status(format!("Revealed {} secrets", ids.len()));
-        }
+        let ids = self.visible_entries().map(|e| e.id.clone()).collect();
+        self.toggle_reveal(ids, "visible secrets");
+    }
+
+    pub fn toggle_reveal_marked(&mut self) {
+        let ids = self.marked_entries().iter().map(|e| e.id.clone()).collect();
+        self.toggle_reveal(ids, "selected secrets");
     }
 
     pub fn move_selection(&mut self, delta: isize) {
@@ -396,8 +570,14 @@ impl App {
         }
         self.commit_range();
         let len = self.filtered_indices.len() as isize;
-        let next = (self.selected_index as isize + delta).clamp(0, len - 1);
-        self.selected_index = next as usize;
+        self.selected_index = (self.selected_index as isize + delta).clamp(0, len - 1) as usize;
+    }
+
+    pub fn jump_to(&mut self, index: usize) {
+        self.commit_range();
+        if !self.filtered_indices.is_empty() {
+            self.selected_index = index.min(self.filtered_indices.len() - 1);
+        }
     }
 
     pub fn clear_selection(&mut self) {
@@ -406,31 +586,24 @@ impl App {
         self.selection_anchor = None;
     }
 
-    pub fn clear_range(&mut self) {
-        self.selection_anchor = None;
-        self.refresh_marked();
-    }
-
     /// Fold the active shift-range into persistent pins so plain navigation
     /// never deselects entries out from under the user. Esc still clears all.
     pub fn commit_range(&mut self) {
-        let current: Vec<usize> = self.marked.iter().copied().collect();
-        for i in current {
-            self.pinned.insert(i);
-        }
+        self.pinned.extend(self.marked.iter().cloned());
         self.selection_anchor = None;
         self.refresh_marked();
     }
 
     fn refresh_marked(&mut self) {
         let mut marked = self.pinned.clone();
-        if let Some(anchor) = self.selection_anchor {
-            if !self.filtered_indices.is_empty() {
-                let len = self.filtered_indices.len();
-                let a = anchor.min(len - 1);
-                let c = self.selected_index.min(len - 1);
-                let (lo, hi) = if a <= c { (a, c) } else { (c, a) };
-                marked.extend(self.filtered_indices[lo..=hi].iter().copied());
+        if let Some(anchor) = self.selection_anchor
+            && !self.filtered_indices.is_empty()
+        {
+            let last = self.filtered_indices.len() - 1;
+            let (a, c) = (anchor.min(last), self.selected_index.min(last));
+            let (lo, hi) = if a <= c { (a, c) } else { (c, a) };
+            for &i in &self.filtered_indices[lo..=hi] {
+                marked.insert(self.ctx.vault.entries[i].id.clone());
             }
         }
         self.marked = marked;
@@ -444,117 +617,127 @@ impl App {
             self.selection_anchor = Some(self.selected_index);
         }
         let len = self.filtered_indices.len() as isize;
-        let next = (self.selected_index as isize + delta).clamp(0, len - 1);
-        self.selected_index = next as usize;
+        self.selected_index = (self.selected_index as isize + delta).clamp(0, len - 1) as usize;
         self.refresh_marked();
     }
 
     pub fn toggle_pin(&mut self) {
-        if self.filtered_indices.is_empty() {
+        let Some(id) = self.selected_id() else {
             return;
-        }
-        let real_idx = self.filtered_indices[self.selected_index];
-        if self.pinned.contains(&real_idx) {
-            self.pinned.remove(&real_idx);
-        } else {
-            self.pinned.insert(real_idx);
+        };
+        if !self.pinned.remove(&id) {
+            self.pinned.insert(id);
         }
         // Advance so Tab-walking pins 1, 4, 6...; shift-range starts fresh from here.
-        let len = self.filtered_indices.len();
-        if self.selected_index + 1 < len {
+        if self.selected_index + 1 < self.filtered_indices.len() {
             self.selected_index += 1;
         }
         self.selection_anchor = None;
         self.refresh_marked();
-        if self.marked.is_empty() {
-            self.set_status("Selection cleared");
-        } else {
-            self.set_status(format!("{} entries selected", self.marked.len()));
-        }
     }
 
     pub fn in_group_mode(&self) -> bool {
         !self.marked.is_empty()
     }
 
-    pub fn toggle_reveal_marked(&mut self) {
-        if self.marked.is_empty() {
-            return;
+    pub fn open_add(&mut self) {
+        self.form_state.wipe();
+        self.form_state.project =
+            TextField::new(self.ctx.config.default_scope().unwrap_or_default());
+        if let Some(p) = self.project_filter.as_deref().filter(|p| *p != "global") {
+            self.form_state.project = TextField::new(p.to_string());
         }
-        let ids: Vec<String> = self
-            .marked
-            .iter()
-            .filter_map(|&i| self.ctx.vault.entries.get(i))
-            .map(|e| e.id.clone())
-            .collect();
-        if ids.iter().all(|id| self.revealed_entries.contains(id)) {
-            for id in &ids {
-                self.revealed_entries.remove(id);
-            }
-            self.set_status(format!("Masked {} selected secrets", ids.len()));
-        } else {
-            for id in &ids {
-                self.revealed_entries.insert(id.clone());
-            }
-            self.set_status(format!("Revealed {} selected secrets", ids.len()));
+        self.active_modal = ActiveModal::Add;
+    }
+
+    pub fn open_edit(&mut self) {
+        if self.in_group_mode() {
+            self.bulk_form = BulkFormState::default();
+            self.active_modal = ActiveModal::BulkEdit;
+        } else if let Some(entry) = self.selected_entry() {
+            let id = entry.id.clone();
+            let form = FormState::from_entry(entry);
+            self.form_state.wipe();
+            self.form_state = form;
+            self.active_modal = ActiveModal::Edit(id);
         }
     }
 
+    pub fn close_form(&mut self) {
+        self.form_state.wipe();
+        self.active_modal = ActiveModal::None;
+    }
+
+    pub fn open_delete(&mut self) {
+        let ids: Vec<String> = if self.in_group_mode() {
+            self.marked_entries().iter().map(|e| e.id.clone()).collect()
+        } else {
+            self.selected_id().into_iter().collect()
+        };
+        if ids.is_empty() {
+            return;
+        }
+        // Destructive: the highlighted default is Cancel.
+        self.delete_choice_delete = false;
+        self.active_modal = ActiveModal::DeleteConfirm(ids);
+    }
+
     pub fn save_form(&mut self) -> Result<(), String> {
-        let name = crate::vault::validate_secret_name(&self.form_state.name.text)?;
-
-        let proj = self.form_state.project.text.trim().to_string();
-        let project = if proj.is_empty() || proj.eq_ignore_ascii_case("global") {
-            None
-        } else {
-            Some(proj)
-        };
-
-        let tags: Vec<String> = self
-            .form_state
-            .tags
-            .text
-            .split(',')
-            .map(|t| t.trim().to_string())
-            .filter(|t| !t.is_empty())
-            .collect();
-
-        let description = if self.form_state.description.text.trim().is_empty() {
-            None
-        } else {
-            Some(self.form_state.description.text.trim().to_string())
-        };
-
+        let name = validate_secret_name(&self.form_state.name.text)?;
+        if self.form_state.value.text.is_empty() {
+            return Err("Secret value cannot be empty".to_string());
+        }
+        let project = normalize_project(Some(&self.form_state.project.text));
+        let tags = normalize_tags(self.form_state.tags.text.split(',').map(str::to_string));
+        let description =
+            Some(self.form_state.description.text.trim().to_string()).filter(|d| !d.is_empty());
         let value = SecretString::new(self.form_state.value.text.clone());
+        let scope_label = project.clone().unwrap_or_else(|| "global".to_string());
 
-        match self.active_modal {
+        match self.active_modal.clone() {
             ActiveModal::Add => {
-                self.ctx
-                    .vault
-                    .set(name.clone(), value, project, tags, description);
-                self.ctx.save().map_err(|e| e.to_string())?;
-                self.set_status(format!("Added secret '{name}'"));
+                let id = self.commit(None, |v| {
+                    if v.find_exact(&name, project.as_deref()).is_some() {
+                        return Err(format!(
+                            "'{name}' already exists in scope '{scope_label}'; select it and edit instead"
+                        ));
+                    }
+                    let entry = crate::vault::SecretEntry::new(name.clone(), value, project, tags, description);
+                    let id = entry.id.clone();
+                    v.entries.push(entry);
+                    Ok(id)
+                })?;
+                self.recompute(Some(id));
+                self.set_success(format!("Added '{name}' to {scope_label}"));
             }
-            ActiveModal::Edit(real_idx) => {
-                if let Some(existing) = self.ctx.vault.entries.get_mut(real_idx) {
-                    existing.name = name.clone();
-                    existing.project = project;
-                    existing.value = value;
-                    existing.tags = tags;
-                    existing.description = description;
-                    existing.updated_at = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs();
-                }
-                self.ctx.save().map_err(|e| e.to_string())?;
-                self.set_status(format!("Updated secret '{name}'"));
+            ActiveModal::Edit(id) => {
+                self.commit(Some(id.clone()), |v| {
+                    if v.entries.iter().any(|e| {
+                        e.id != id
+                            && e.name == name
+                            && same_project(e.project.as_deref(), project.as_deref())
+                    }) {
+                        return Err(format!("'{name}' already exists in scope '{scope_label}'"));
+                    }
+                    let entry = v
+                        .entries
+                        .iter_mut()
+                        .find(|e| e.id == id)
+                        .ok_or("This entry was deleted outside this window")?;
+                    entry.name = name.clone();
+                    entry.project = project;
+                    entry.value = value;
+                    entry.tags = tags;
+                    entry.description = description;
+                    entry.touch();
+                    Ok(())
+                })?;
+                self.set_success(format!("Updated '{name}'"));
             }
-            _ => {}
+            _ => return Ok(()),
         }
 
-        self.active_modal = ActiveModal::None;
-        self.update_filtered_indices();
+        self.close_form();
         Ok(())
     }
 
@@ -567,32 +750,29 @@ impl App {
     }
 
     pub fn delete_selected_entry(&mut self) -> Result<(), String> {
-        if !self.marked.is_empty() {
-            let mut idxs: Vec<usize> = self.marked.iter().copied().collect();
-            idxs.sort_unstable_by(|a, b| b.cmp(a));
-            let mut removed = 0;
-            for i in idxs {
-                if i < self.ctx.vault.entries.len() {
-                    self.ctx.vault.entries.remove(i);
-                    removed += 1;
-                }
-            }
-            self.ctx.save().map_err(|e| e.to_string())?;
-            self.set_status(format!("Deleted {removed} secrets"));
-            self.active_modal = ActiveModal::None;
-            self.update_filtered_indices();
+        let ActiveModal::DeleteConfirm(ids) = self.active_modal.clone() else {
             return Ok(());
-        }
-        if let ActiveModal::DeleteConfirm(real_idx) = self.active_modal {
-            if real_idx < self.ctx.vault.entries.len() {
-                let name = self.ctx.vault.entries[real_idx].name.clone();
-                self.ctx.vault.entries.remove(real_idx);
-                self.ctx.save().map_err(|e| e.to_string())?;
-                self.set_status(format!("Deleted secret '{name}'"));
-            }
-        }
+        };
         self.active_modal = ActiveModal::None;
-        self.update_filtered_indices();
+        let doomed: HashSet<String> = ids.into_iter().collect();
+        let focus = self.selected_id().filter(|id| !doomed.contains(id));
+        let removed: Vec<String> = self.commit(focus, |v| {
+            let names = v
+                .entries
+                .iter()
+                .filter(|e| doomed.contains(&e.id))
+                .map(|e| e.name.clone())
+                .collect::<Vec<_>>();
+            v.entries.retain(|e| !doomed.contains(&e.id));
+            Ok(names)
+        })?;
+        self.clear_selection();
+        self.refresh_marked();
+        match removed.as_slice() {
+            [] => self.set_status("Nothing deleted (already removed elsewhere)"),
+            [one] => self.set_success(format!("Deleted '{one}'")),
+            many => self.set_success(format!("Deleted {} secrets", many.len())),
+        }
         Ok(())
     }
 
@@ -601,47 +781,65 @@ impl App {
             return Err("No entries selected".to_string());
         }
 
-        let proj = self.bulk_form.project.text.trim().to_string();
-        let change_project = !proj.is_empty();
-        let new_project = if proj.eq_ignore_ascii_case("global") {
-            None
-        } else {
-            Some(proj)
-        };
-
+        let proj_raw = self.bulk_form.project.text.trim().to_string();
+        let change_project = !proj_raw.is_empty();
+        let new_project = normalize_project(Some(&proj_raw));
         let tags_raw = self.bulk_form.tags.text.trim().to_string();
         let change_tags = !tags_raw.is_empty();
-        let new_tags: Vec<String> = tags_raw
-            .split(',')
-            .map(|t| t.trim().to_string())
-            .filter(|t| !t.is_empty())
-            .collect();
+        let new_tags = normalize_tags(tags_raw.split(',').map(str::to_string));
 
         if !change_project && !change_tags {
-            return Err("Nothing to change (both fields blank keep current values)".to_string());
+            return Err("Nothing to change (blank fields keep current values)".to_string());
         }
 
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        let mut updated = 0;
-        for &i in self.marked.iter() {
-            if let Some(entry) = self.ctx.vault.entries.get_mut(i) {
+        let ids = self.marked.clone();
+        let focus = self.selected_id();
+        let updated = self.commit(focus, |v| {
+            if change_project {
+                let mut owners: HashMap<(String, Option<String>), Vec<bool>> = HashMap::new();
+                for e in &v.entries {
+                    let moving = ids.contains(&e.id);
+                    let project = if moving {
+                        new_project.clone()
+                    } else {
+                        e.project.clone()
+                    };
+                    owners
+                        .entry((e.name.clone(), project.map(|p| p.to_lowercase())))
+                        .or_default()
+                        .push(moving);
+                }
+                let mut clashes: Vec<String> = owners
+                    .into_iter()
+                    .filter(|(_, who)| who.len() > 1 && who.iter().any(|m| *m))
+                    .map(|((name, _), _)| name)
+                    .collect();
+                if !clashes.is_empty() {
+                    clashes.sort();
+                    return Err(format!(
+                        "Moving would create duplicates in '{}': {}",
+                        new_project.as_deref().unwrap_or("global"),
+                        clashes.join(", ")
+                    ));
+                }
+            }
+            let mut updated = 0;
+            for entry in v.entries.iter_mut().filter(|e| ids.contains(&e.id)) {
                 if change_project {
                     entry.project = new_project.clone();
                 }
                 if change_tags {
                     entry.tags = new_tags.clone();
                 }
-                entry.updated_at = now;
+                entry.touch();
                 updated += 1;
             }
-        }
-        self.ctx.save().map_err(|e| e.to_string())?;
+            Ok(updated)
+        })?;
         self.active_modal = ActiveModal::None;
-        self.update_filtered_indices();
-        self.set_status(format!("Updated {updated} secrets (values untouched)"));
+        self.clear_selection();
+        self.refresh_marked();
+        self.set_success(format!("Updated {updated} secrets (values untouched)"));
         Ok(())
     }
 
@@ -650,146 +848,141 @@ impl App {
         if path_str.is_empty() {
             return Err("File path cannot be empty".to_string());
         }
-        if std::path::Path::new(&path_str).is_dir() {
+        let path = expand_path(std::path::Path::new(&path_str));
+        if path.is_dir() {
             return Err(format!(
-                "'{path_str}' is a directory. Provide a .env file path (e.g. '{path_str}.env')."
+                "'{path_str}' is a directory; pick a .env file inside it"
             ));
         }
-        let content =
-            std::fs::read_to_string(&path_str).map_err(|e| format!("Cannot read file: {e}"))?;
+        let content = zeroize::Zeroizing::new(
+            std::fs::read_to_string(&path).map_err(|e| format!("Cannot read '{path_str}': {e}"))?,
+        );
         let (entries, skipped) = parse_dotenv(&content);
-
-        let proj = self.path_form.project.text.trim().to_string();
-        let project = if proj.is_empty() || proj.eq_ignore_ascii_case("global") {
-            None
-        } else {
-            Some(proj)
-        };
-
-        let mut imported = 0;
-        let mut empty_skipped = 0;
-        for e in entries {
-            if e.value.is_empty() {
-                empty_skipped += 1;
-                continue;
-            }
-            self.ctx.vault.set(
-                e.key,
-                SecretString::new(&e.value),
-                project.clone(),
-                Vec::new(),
-                None,
-            );
-            imported += 1;
-        }
-        self.ctx.save().map_err(|e| e.to_string())?;
+        let project = normalize_project(Some(&self.path_form.project.text));
+        let focus = self.selected_id();
+        let summary = crate::cli::import_entries(&mut self.ctx, entries, project, Vec::new())?;
+        self.recompute(focus);
         self.active_modal = ActiveModal::None;
-        self.update_filtered_indices();
-        self.set_status(format!(
-            "Imported {imported} entries (skipped {skipped} invalid, {empty_skipped} empty)"
+        self.set_success(format!(
+            "Imported {} entr{} (skipped {} invalid, {} empty)",
+            summary.imported,
+            if summary.imported == 1 { "y" } else { "ies" },
+            skipped + summary.invalid_names,
+            summary.empty
         ));
         Ok(())
     }
 
     pub fn run_export(&mut self) -> Result<(), String> {
-        use crate::cli::{resolve_export_path, write_secret_file};
-        use crate::dotenv::{format_env, format_example, EnvEntry};
+        use crate::cli::{ExportFormat, resolve_export_path, write_secret_file};
+        use crate::dotenv::{EnvEntry, format_env, format_example};
 
         let path_str = self.path_form.path.text.trim().to_string();
         if path_str.is_empty() {
             return Err("File path cannot be empty".to_string());
         }
-        let out_path = resolve_export_path(
-            std::path::Path::new(&path_str),
-            self.path_form.export_example,
-        );
-
-        let source: Vec<usize> = if !self.marked.is_empty() {
-            let mut v: Vec<usize> = self.marked.iter().copied().collect();
-            v.sort_unstable();
-            v
+        let format = if self.path_form.export_example {
+            ExportFormat::Example
         } else {
-            self.filtered_indices.clone()
+            ExportFormat::Env
         };
+        let out_path = resolve_export_path(&expand_path(std::path::Path::new(&path_str)), format);
 
-        let output = if self.path_form.export_example {
-            let mut keys: Vec<String> = source
-                .iter()
-                .filter_map(|&i| self.ctx.vault.entries.get(i))
-                .map(|e| e.name.clone())
-                .collect();
-            keys.sort();
+        let source: Vec<&SecretEntry> = if self.in_group_mode() {
+            self.marked_entries()
+        } else {
+            self.visible_entries().collect()
+        };
+        let mut entries: Vec<EnvEntry> = source
+            .iter()
+            .map(|e| EnvEntry {
+                key: e.name.clone(),
+                value: e.value.expose_secret().to_string(),
+            })
+            .collect();
+        entries.sort_by(|a, b| a.key.cmp(&b.key));
+        let mut dupes: Vec<String> = entries
+            .windows(2)
+            .filter(|w| w[0].key == w[1].key)
+            .map(|w| w[0].key.clone())
+            .collect();
+        dupes.dedup();
+
+        let output = zeroize::Zeroizing::new(if self.path_form.export_example {
+            let mut keys: Vec<String> = entries.iter().map(|e| e.key.clone()).collect();
             keys.dedup();
             format_example(&keys)
         } else {
-            let mut entries: Vec<EnvEntry> = source
-                .iter()
-                .filter_map(|&i| self.ctx.vault.entries.get(i))
-                .map(|e| EnvEntry {
-                    key: e.name.clone(),
-                    value: e.value.expose_secret().to_string(),
-                })
-                .collect();
-            entries.sort_by(|a, b| a.key.cmp(&b.key));
             format_env(&entries)
-        };
+        });
+        for e in &mut entries {
+            e.value.zeroize();
+        }
 
         write_secret_file(&out_path, output.as_bytes())
             .map_err(|e| format!("Cannot write file: {e}"))?;
         self.active_modal = ActiveModal::None;
-        self.set_status(format!(
+        let msg = format!(
             "Exported {} entries to '{}'",
-            source.len(),
+            entries.len(),
             out_path.display()
-        ));
+        );
+        if dupes.is_empty() {
+            self.set_success(msg);
+        } else {
+            self.set_error(format!(
+                "{msg}; duplicate keys from different scopes: {} (narrow the scope)",
+                dupes.join(", ")
+            ));
+        }
         Ok(())
     }
 
-    pub fn cycle_project_filter(&mut self) {
-        let mut projects: Vec<String> = self
-            .ctx
-            .vault
-            .entries
-            .iter()
-            .filter_map(|e| e.project.clone())
-            .collect();
-        projects.sort();
-        projects.dedup();
+    pub fn scope_options(&self) -> Vec<String> {
+        let mut opts = vec!["all".to_string(), "global".to_string()];
+        opts.extend(self.ctx.vault.projects());
+        opts
+    }
 
-        let options = {
-            let mut opts = vec!["all".to_string(), "global".to_string()];
-            opts.extend(projects);
-            opts
-        };
-
+    pub fn cycle_project_filter_by(&mut self, step: isize) {
+        let options = self.scope_options();
         let current = self.project_filter.as_deref().unwrap_or("all");
-        let next_idx = options
+        let pos = options
             .iter()
-            .position(|p| p == current)
-            .map(|i| (i + 1) % options.len())
-            .unwrap_or(0);
-
-        let next = &options[next_idx];
-        self.project_filter = if next == "all" {
-            None
-        } else {
-            Some(next.clone())
-        };
+            .position(|p| p.eq_ignore_ascii_case(current))
+            .unwrap_or(0) as isize;
+        let n = options.len() as isize;
+        let next = &options[((pos + step) % n + n) as usize % options.len()];
+        self.project_filter = (next != "all").then(|| next.clone());
         self.update_filtered_indices();
+    }
+
+    pub fn cycle_project_filter(&mut self) {
+        self.cycle_project_filter_by(1);
+    }
+
+    pub fn lock_and_quit(&mut self) {
+        let _ = crate::daemon::lock_daemon(&self.ctx.socket_path);
+        self.should_quit = true;
+        self.exit_message = Some("Vault locked. Session daemon stopped.".to_string());
     }
 }
 
+/// Tab-completes a filesystem path; `~/` is kept in the result.
 pub fn complete_path(input: &str) -> (String, String) {
     let home = std::env::var("HOME").unwrap_or_default();
-    let uses_tilde = input.starts_with("~/");
-    let expanded = if uses_tilde && !home.is_empty() {
+    let uses_tilde = input.starts_with("~/") && !home.is_empty();
+    let expanded = if uses_tilde {
         format!("{}{}", home, &input[1..])
     } else {
         input.to_string()
     };
 
     let (dir_part, prefix) = match expanded.rfind('/') {
-        Some(idx) => (expanded[..=idx].to_string(), expanded[idx + 1..].to_string()),
+        Some(idx) => (
+            expanded[..=idx].to_string(),
+            expanded[idx + 1..].to_string(),
+        ),
         None => (String::new(), expanded.clone()),
     };
     let search_dir = if dir_part.is_empty() {
@@ -804,7 +997,7 @@ pub fn complete_path(input: &str) -> (String, String) {
             return (
                 input.to_string(),
                 format!("No such directory: {search_dir}"),
-            )
+            );
         }
     };
 
@@ -821,18 +1014,14 @@ pub fn complete_path(input: &str) -> (String, String) {
 
     let mut common = matches[0].clone();
     for m in &matches[1..] {
-        let mut len = 0;
-        for (a, b) in common.bytes().zip(m.bytes()) {
-            if a == b {
-                len += 1;
-            } else {
-                break;
-            }
-        }
+        let len = common
+            .char_indices()
+            .zip(m.chars())
+            .take_while(|((_, a), b)| a == b)
+            .last()
+            .map(|((i, a), _)| i + a.len_utf8())
+            .unwrap_or(0);
         common.truncate(len);
-        while !common.is_char_boundary(common.len()) {
-            common.pop();
-        }
     }
 
     let mut completed_expanded = format!("{dir_part}{common}");
@@ -840,7 +1029,7 @@ pub fn complete_path(input: &str) -> (String, String) {
         completed_expanded.push('/');
     }
 
-    let completed = if uses_tilde && !home.is_empty() {
+    let completed = if uses_tilde {
         match completed_expanded.strip_prefix(&home) {
             Some(rest) => format!("~{rest}"),
             None => completed_expanded,
