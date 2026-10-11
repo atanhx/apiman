@@ -48,6 +48,25 @@ pub fn read_secure_password(prompt: &str) -> std::io::Result<String> {
     }
 }
 
+/// Secret value input: a hidden prompt on a terminal, otherwise everything on
+/// stdin (so multi-line values such as PEM keys survive) minus one trailing
+/// newline.
+pub fn read_secret_value(prompt: &str) -> std::io::Result<zeroize::Zeroizing<String>> {
+    use std::io::{self, IsTerminal, Read};
+    if io::stdin().is_terminal() {
+        return read_secure_password(prompt).map(zeroize::Zeroizing::new);
+    }
+    let mut value = zeroize::Zeroizing::new(String::new());
+    io::stdin().read_to_string(&mut value)?;
+    if value.ends_with('\n') {
+        value.pop();
+        if value.ends_with('\r') {
+            value.pop();
+        }
+    }
+    Ok(value)
+}
+
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct SecretString {
     inner: String,
