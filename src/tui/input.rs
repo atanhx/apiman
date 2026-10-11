@@ -1,5 +1,5 @@
 use crate::daemon::lock_daemon;
-use crate::tui::app::{ActiveModal, App, PathFormState, TextField};
+use crate::tui::app::{complete_path, ActiveModal, App, PathFormState, TextField};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 pub fn handle_key(app: &mut App, key: KeyEvent) {
@@ -70,8 +70,18 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) {
         KeyCode::Char('c') => {
             app.copy_selected_secret();
         }
-        KeyCode::Char(' ') | KeyCode::Char('v') => {
+        KeyCode::Char(' ') => {
+            if key.modifiers.contains(KeyModifiers::SHIFT) {
+                app.toggle_reveal_all();
+            } else {
+                app.toggle_selected_reveal();
+            }
+        }
+        KeyCode::Char('v') => {
             app.toggle_selected_reveal();
+        }
+        KeyCode::Char('*') => {
+            app.toggle_reveal_all();
         }
         KeyCode::Char('a') => {
             let default_proj = if app.ctx.config.default_project == "global" {
@@ -279,10 +289,23 @@ fn handle_path_form_key(app: &mut App, key: KeyEvent) {
         KeyCode::Esc => {
             app.active_modal = ActiveModal::None;
         }
-        KeyCode::Tab | KeyCode::Down => {
+        KeyCode::Tab => {
+            if app.path_form.active_field == 0 {
+                let (completed, msg) = complete_path(&app.path_form.path.text);
+                app.path_form.path.text = completed;
+                app.path_form.path.move_end();
+                app.set_status(msg);
+            } else {
+                app.path_form.next_field(max_fields);
+            }
+        }
+        KeyCode::BackTab => {
+            app.path_form.prev_field(max_fields);
+        }
+        KeyCode::Down => {
             app.path_form.next_field(max_fields);
         }
-        KeyCode::BackTab | KeyCode::Up => {
+        KeyCode::Up => {
             app.path_form.prev_field(max_fields);
         }
         KeyCode::Left => {

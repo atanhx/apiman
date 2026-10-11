@@ -432,6 +432,26 @@ fn test_apiman_end_to_end_lifecycle() {
     assert!(!example_text.contains("plainvalue"));
     assert!(!example_text.contains("exported-value"));
 
+    // 19. Export directly into a directory (default filename is used)
+    let export_dir = dir.path().join("export-target");
+    std::fs::create_dir_all(&export_dir).unwrap();
+    let export_to_dir = {
+        let mut cmd = apiman(binary, &vault_file, &socket_file, new_password);
+        cmd.args([
+            "export",
+            "--project",
+            "backend",
+            "--output",
+            &format!("{}/", export_dir.display()),
+        ]);
+        cmd.output().unwrap()
+    };
+    assert!(export_to_dir.status.success());
+    let dir_exported = export_dir.join("apiman-export.env");
+    assert!(dir_exported.is_file());
+    let dir_text = std::fs::read_to_string(&dir_exported).unwrap();
+    assert!(dir_text.contains("PLAIN=plainvalue"));
+
     // Cleanup isolated daemon
     let _ = run_cmd(
         apiman(binary, &vault_file, &socket_file, new_password),
@@ -597,4 +617,87 @@ fn test_stale_daemon_self_heal() {
         .arg("lock")
         .env("APIMAN_SOCKET", &socket_file);
     let _ = lock_cmd.output();
+}
+
+#[test]
+fn test_tui_reveal_all_and_path_completion() {
+    use apiman::tui::app::{complete_path, App, TextField};
+    use apiman::{cli::SessionContext, config::Config, storage};
+
+    let dir = tempdir().unwrap();
+    let vault_file: PathBuf = dir.path().join("reveal_vault.enc");
+    let socket_file: PathBuf = dir.path().join("reveal_daemon.sock");
+    let password = "reveal-test-password";
+
+    // Build a real vault on disk through the storage layer
+    let (mut vault, key, salt) =
+        storage::init_vault(password, &vault_file).unwrap();
+    vault.set(
+        "FIRST_KEY".to_string(),
+        "first-value".into(),
+        None,
+        Vec::new(),
+        None,
+    );
+    vault.set(
+        "SECOND_KEY".to_string(),
+        "second-value".into(),
+        Some("proj".to_string()),
+        Vec::new(),
+        None,
+    );
+    storage::save_vault(&vault, &key, &salt, &vault_file).unwrap();
+
+    // Reload exactly like the CLI does after unlocking
+    let (vault, key, salt) =
+        storage::load_vault_with_password(password, &vault_file).unwrap();
+    let ctx = SessionContext {
+        config: Config::default(),
+        vault_path: vault_file,
+        socket_path: socket_file,
+        master_key: key,
+        salt,
+        vault,
+    };
+    let mut app = App::new(ctx);
+    assert_eq!(app.filtered_indices.len(), 2);
+    assert!(app.revealed_entries.is_empty());
+
+    // Reveal-all toggles every visible entry, second toggle masks them again
+    app.toggle_reveal_all();
+    assert_eq!(app.revealed_entries.len(), 2);
+    app.toggle_reveal_all();
+    assert!(app.revealed_entries.is_empty());
+
+    // Reveal-all respects the active search filter
+    app.search_query = TextField::new("first".to_string());
+    app.update_filtered_indices();
+    assert_eq!(app.filtered_indices.len(), 1);
+    app.toggle_reveal_all();
+    assert_eq!(app.revealed_entries.len(), 1);
+    assert_eq!(app.selected_entry().unwrap().name, "FIRST_KEY");
+
+    // Path completion: single match completes, multi-match extends common prefix
+    let comp_dir = dir.path().join("complete");
+    std::fs::create_dir_all(&comp_dir).unwrap();
+    std::fs::write(comp_dir.join("alpha.env"), "A=1").unwrap();
+    std::fs::write(comp_dir.join("alphabet.env"), "B=2").unwrap();
+    std::fs::write(comp_dir.join("beta.env"), "C=3").unwrap();
+    let base = comp_dir.to_string_lossy().to_string();
+
+    let (done, msg) = complete_path(&format!("{base}/alp"));
+    assert_eq!(done, format!("{base}/alpha"));
+    assert!(msg.contains("2 matches"), "unexpected: {msg}");
+
+    let (done, msg) = complete_path(&format!("{base}/alpha.env"));
+    assert_eq!(done, format!("{base}/alpha.env"));
+    assert!(msg.contains("Completed"), "unexpected: {msg}");
+
+    let (done, msg) = complete_path(&format!("{base}/bet"));
+    assert_eq!(done, format!("{base}/beta.env"));
+    assert!(msg.contains("Completed"), "unexpected: {msg}");
+
+    let (same, msg) = complete_path(&format!("{base}/zzz"));
+    assert_eq!(same, format!("{base}/zzz"));
+    assert_eq!(msg, "No matches");
 }

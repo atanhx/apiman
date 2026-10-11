@@ -325,6 +325,30 @@ impl App {
         }
     }
 
+    pub fn toggle_reveal_all(&mut self) {
+        let ids: Vec<String> = self
+            .filtered_indices
+            .iter()
+            .filter_map(|&i| self.ctx.vault.entries.get(i))
+            .map(|e| e.id.clone())
+            .collect();
+        if ids.is_empty() {
+            self.set_status("No entries to reveal");
+            return;
+        }
+        if ids.iter().all(|id| self.revealed_entries.contains(id)) {
+            for id in &ids {
+                self.revealed_entries.remove(id);
+            }
+            self.set_status("Masked all visible secrets");
+        } else {
+            for id in &ids {
+                self.revealed_entries.insert(id.clone());
+            }
+            self.set_status(format!("Revealed {} secrets", ids.len()));
+        }
+    }
+
     pub fn move_selection(&mut self, delta: isize) {
         if self.filtered_indices.is_empty() {
             return;
@@ -422,6 +446,11 @@ impl App {
         if path_str.is_empty() {
             return Err("File path cannot be empty".to_string());
         }
+        if std::path::Path::new(&path_str).is_dir() {
+            return Err(format!(
+                "'{path_str}' is a directory. Provide a .env file path (e.g. '{path_str}.env')."
+            ));
+        }
         let content =
             std::fs::read_to_string(&path_str).map_err(|e| format!("Cannot read file: {e}"))?;
         let (entries, skipped) = parse_dotenv(&content);
@@ -459,13 +488,17 @@ impl App {
     }
 
     pub fn run_export(&mut self) -> Result<(), String> {
-        use crate::cli::write_secret_file;
+        use crate::cli::{resolve_export_path, write_secret_file};
         use crate::dotenv::{format_env, format_example, EnvEntry};
 
         let path_str = self.path_form.path.text.trim().to_string();
         if path_str.is_empty() {
             return Err("File path cannot be empty".to_string());
         }
+        let out_path = resolve_export_path(
+            std::path::Path::new(&path_str),
+            self.path_form.export_example,
+        );
 
         let output = if self.path_form.export_example {
             let mut keys: Vec<String> = self
@@ -491,10 +524,10 @@ impl App {
             format_env(&entries)
         };
 
-        write_secret_file(std::path::Path::new(&path_str), output.as_bytes())
+        write_secret_file(&out_path, output.as_bytes())
             .map_err(|e| format!("Cannot write file: {e}"))?;
         self.active_modal = ActiveModal::None;
-        self.set_status(format!("Exported to '{path_str}'"));
+        self.set_status(format!("Exported to '{}'", out_path.display()));
         Ok(())
     }
 
@@ -530,4 +563,89 @@ impl App {
         };
         self.update_filtered_indices();
     }
+}
+
+pub fn complete_path(input: &str) -> (String, String) {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let uses_tilde = input.starts_with("~/");
+    let expanded = if uses_tilde && !home.is_empty() {
+        format!("{}{}", home, &input[1..])
+    } else {
+        input.to_string()
+    };
+
+    let (dir_part, prefix) = match expanded.rfind('/') {
+        Some(idx) => (expanded[..=idx].to_string(), expanded[idx + 1..].to_string()),
+        None => (String::new(), expanded.clone()),
+    };
+    let search_dir = if dir_part.is_empty() {
+        ".".to_string()
+    } else {
+        dir_part.clone()
+    };
+
+    let read_dir = match std::fs::read_dir(&search_dir) {
+        Ok(rd) => rd,
+        Err(_) => {
+            return (
+                input.to_string(),
+                format!("No such directory: {search_dir}"),
+            )
+        }
+    };
+
+    let mut matches: Vec<String> = read_dir
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with(&prefix))
+        .collect();
+    matches.sort();
+
+    if matches.is_empty() {
+        return (input.to_string(), "No matches".to_string());
+    }
+
+    let mut common = matches[0].clone();
+    for m in &matches[1..] {
+        let mut len = 0;
+        for (a, b) in common.bytes().zip(m.bytes()) {
+            if a == b {
+                len += 1;
+            } else {
+                break;
+            }
+        }
+        common.truncate(len);
+        while !common.is_char_boundary(common.len()) {
+            common.pop();
+        }
+    }
+
+    let mut completed_expanded = format!("{dir_part}{common}");
+    if matches.len() == 1 && std::path::Path::new(&completed_expanded).is_dir() {
+        completed_expanded.push('/');
+    }
+
+    let completed = if uses_tilde && !home.is_empty() {
+        match completed_expanded.strip_prefix(&home) {
+            Some(rest) => format!("~{rest}"),
+            None => completed_expanded,
+        }
+    } else {
+        completed_expanded
+    };
+
+    let status = if matches.len() == 1 {
+        format!("Completed: {}", matches[0])
+    } else {
+        let shown: Vec<&str> = matches.iter().take(8).map(|s| s.as_str()).collect();
+        let more = if matches.len() > 8 {
+            format!(" (+{} more)", matches.len() - 8)
+        } else {
+            String::new()
+        };
+        format!("{} matches: {}{}", matches.len(), shown.join("  "), more)
+    };
+
+    (completed, status)
 }

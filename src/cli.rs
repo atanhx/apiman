@@ -755,6 +755,13 @@ fn handle_import(
         eprintln!("Error: File '{}' not found.", args.file.display());
         return Ok(ExitCode::FAILURE);
     }
+    if args.file.is_dir() {
+        eprintln!(
+            "Error: '{}' is a directory. Provide a .env file path to import.",
+            args.file.display()
+        );
+        return Ok(ExitCode::FAILURE);
+    }
 
     let content = std::fs::read_to_string(&args.file)?;
     let (entries, skipped) = parse_dotenv(&content);
@@ -825,11 +832,12 @@ fn handle_export(
     };
 
     if let Some(out_path) = args.output {
-        write_secret_file(&out_path, output.as_bytes())?;
+        let resolved = resolve_export_path(&out_path, is_example);
+        write_secret_file(&resolved, output.as_bytes())?;
         eprintln!(
             "Exported {} to '{}'",
             if is_example { "example template" } else { "secrets" },
-            out_path.display()
+            resolved.display()
         );
         return Ok(ExitCode::SUCCESS);
     }
@@ -845,6 +853,19 @@ fn handle_export(
     print!("{output}");
     io::stdout().flush()?;
     Ok(ExitCode::SUCCESS)
+}
+
+pub fn resolve_export_path(path: &Path, is_example: bool) -> PathBuf {
+    let default_name = if is_example {
+        "apiman-export.env.example"
+    } else {
+        "apiman-export.env"
+    };
+    let raw = path.to_string_lossy();
+    if raw.ends_with('/') || raw.ends_with('\\') || (path.exists() && path.is_dir()) {
+        return path.join(default_name);
+    }
+    path.to_path_buf()
 }
 
 pub fn write_secret_file(path: &Path, content: &[u8]) -> Result<(), std::io::Error> {

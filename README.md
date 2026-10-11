@@ -71,7 +71,8 @@ apiman
 - `Up` / `Down` or `j` / `k`: Move selection (`PgUp`/`PgDn` jump 10, `Home`/`End` jump to ends)
 - `Left` / `Right`: Cycle project scope filter (`all` -> `global` -> projects)
 - `c`: Copy selected secret value to clipboard (supports Wayland `wl-copy`, X11, macOS, and OSC 52)
-- `Space` or `v`: Toggle masked (`••••••••`) vs revealed secret value
+- `Space` or `v`: Toggle masked (`••••••••`) vs revealed secret value (single entry)
+- `Shift+Space` or `*`: Reveal / mask ALL currently visible secrets at once
 - `a`: Add new secret entry (interactive form modal)
 - `e`: Edit selected entry
 - `d` or `Delete`: Delete selected entry (`Left`/`Right` + `Enter` to confirm)
@@ -160,13 +161,16 @@ Supports `export KEY=...` prefixes, single/double quotes, `\n` escapes, `#` comm
 # Write project secrets (with global fallback) to a file (0600 permissions)
 apiman export --project backend --output ./backend/.env
 
+# Point at a folder to auto-save apiman-export.env inside it
+apiman export --project backend --output /home/um/Downloads/
+
 # Generate a safe .env.example template (keys only, no secret values)
 apiman export --format example --output ./.env.example
 
 # Pipe to another tool (raw KEY=VALUE lines)
 apiman export --project billing | wl-copy
 ```
-In the TUI, press `i` to import or `X` to export whatever is currently visible (respects search + scope filter).
+In the TUI, press `i` to import or `X` to export whatever is currently visible (respects search + scope filter). Path fields show grey placeholder examples and support `Tab` filesystem autocompletion.
 
 #### Change Master Password
 ```bash

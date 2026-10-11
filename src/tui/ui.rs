@@ -290,6 +290,13 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
             ),
             Span::styled(" Reveal ", Style::default().fg(Color::White)),
             Span::styled(
+                "[*]",
+                Style::default()
+                    .fg(ACCENT_ORANGE)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" RevealAll ", Style::default().fg(Color::White)),
+            Span::styled(
                 "[a]",
                 Style::default()
                     .fg(ACCENT_ORANGE)
@@ -381,7 +388,8 @@ fn render_help_modal(frame: &mut Frame) {
                 .add_modifier(Modifier::BOLD),
         )]),
         Line::from(Span::styled("  c                   Copy selected secret value to clipboard", Style::default().fg(Color::White))),
-        Line::from(Span::styled("  Space / v           Toggle masked (••••) vs plaintext reveal", Style::default().fg(Color::White))),
+        Line::from(Span::styled("  Space / v           Toggle masked (••••) vs plaintext reveal (single entry)", Style::default().fg(Color::White))),
+        Line::from(Span::styled("  Shift+Space or *    Reveal / mask ALL currently visible secrets", Style::default().fg(Color::White))),
         Line::from(Span::styled("  a                   Open Add Secret form modal", Style::default().fg(Color::White))),
         Line::from(Span::styled("  e                   Edit selected secret details", Style::default().fg(Color::White))),
         Line::from(Span::styled("    (in forms: Tab/Up/Down switch fields, Left/Right/Home/End move cursor)", Style::default().fg(Color::White))),
@@ -711,16 +719,28 @@ fn render_import_modal(frame: &mut Frame, app: &App) {
         ])
         .split(area);
 
-    let path_text = if active == 0 {
+    let path_text = if app.path_form.path.text.is_empty() {
+        let placeholder = "e.g. ./backend/.env  (Tab completes paths)";
+        if active == 0 {
+            format!("█{placeholder}")
+        } else {
+            placeholder.to_string()
+        }
+    } else if active == 0 {
         app.path_form.path.with_cursor_marker(false)
     } else {
         app.path_form.path.text.clone()
     };
+    let path_is_placeholder = app.path_form.path.text.is_empty();
     let path_widget = Paragraph::new(path_text)
         .style(
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
+            if path_is_placeholder {
+                Style::default().fg(Color::DarkGray)
+            } else {
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD)
+            },
         )
         .block(field_block(" .env file path ", active == 0));
     frame.render_widget(path_widget, chunks[0]);
@@ -741,11 +761,9 @@ fn render_import_modal(frame: &mut Frame, app: &App) {
 
     let hints = Line::from(vec![
         Span::styled("[Tab]", Style::default().fg(ACCENT_ORANGE).add_modifier(Modifier::BOLD)),
-        Span::styled(" Next | ", Style::default().fg(Color::White)),
-        Span::styled("[Left/Right]", Style::default().fg(ACCENT_ORANGE).add_modifier(Modifier::BOLD)),
-        Span::styled(" Cursor | ", Style::default().fg(Color::White)),
+        Span::styled(" Complete path | ", Style::default().fg(Color::White)),
         Span::styled("[Enter]", Style::default().fg(ACCENT_ORANGE).add_modifier(Modifier::BOLD)),
-        Span::styled(" Import | ", Style::default().fg(Color::White)),
+        Span::styled(" Next/Import | ", Style::default().fg(Color::White)),
         Span::styled("[Esc]", Style::default().fg(ACCENT_RED).add_modifier(Modifier::BOLD)),
         Span::styled(" Cancel", Style::default().fg(Color::White)),
     ]);
@@ -783,16 +801,28 @@ fn render_export_modal(frame: &mut Frame, app: &App) {
         ])
         .split(area);
 
-    let path_text = if active == 0 {
+    let path_text = if app.path_form.path.text.is_empty() {
+        let placeholder = "e.g. /home/um/Downloads/  (a folder auto-saves apiman-export.env inside)";
+        if active == 0 {
+            format!("█{placeholder}")
+        } else {
+            placeholder.to_string()
+        }
+    } else if active == 0 {
         app.path_form.path.with_cursor_marker(false)
     } else {
         app.path_form.path.text.clone()
     };
+    let path_is_placeholder = app.path_form.path.text.is_empty();
     let path_widget = Paragraph::new(path_text)
         .style(
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
+            if path_is_placeholder {
+                Style::default().fg(Color::DarkGray)
+            } else {
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD)
+            },
         )
         .block(field_block(" Output file path ", active == 0));
     frame.render_widget(path_widget, chunks[0]);
@@ -819,9 +849,9 @@ fn render_export_modal(frame: &mut Frame, app: &App) {
 
     let hints = Line::from(vec![
         Span::styled("[Tab]", Style::default().fg(ACCENT_ORANGE).add_modifier(Modifier::BOLD)),
-        Span::styled(" Next | ", Style::default().fg(Color::White)),
+        Span::styled(" Complete path | ", Style::default().fg(Color::White)),
         Span::styled("[Space]", Style::default().fg(ACCENT_ORANGE).add_modifier(Modifier::BOLD)),
-        Span::styled(" Toggle | ", Style::default().fg(Color::White)),
+        Span::styled(" Toggle format | ", Style::default().fg(Color::White)),
         Span::styled("[Enter]", Style::default().fg(ACCENT_ORANGE).add_modifier(Modifier::BOLD)),
         Span::styled(" Export | ", Style::default().fg(Color::White)),
         Span::styled("[Esc]", Style::default().fg(ACCENT_RED).add_modifier(Modifier::BOLD)),
