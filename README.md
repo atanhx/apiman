@@ -73,6 +73,8 @@ apiman
 - `c`: Copy selected secret value to clipboard (supports Wayland `wl-copy`, X11, macOS, and OSC 52)
 - `Space` or `v`: Toggle masked (`••••••••`) vs revealed secret value (single entry)
 - `Shift+Space` or `*`: Reveal / mask ALL currently visible secrets at once
+- `Shift+Up` / `Shift+Down`: Select multiple entries (group mode, marked with `+`)
+  - In group mode: `e` bulk-edits project/tags for all selected (values are never touched — blank fields keep current values, `global` moves entries to global scope), `d` deletes all selected, `Esc` clears the selection
 - `a`: Add new secret entry (interactive form modal)
 - `e`: Edit selected entry
 - `d` or `Delete`: Delete selected entry (`Left`/`Right` + `Enter` to confirm)

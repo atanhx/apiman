@@ -512,8 +512,7 @@ fn is_dir_in_test_path(dir: &std::path::Path) -> bool {
 }
 
 #[test]
-fn test_stale_daemon_self_heal() {
-    let dir = tempdir().unwrap();
+fn test_stale_daemon_self_heal() {    let dir = tempdir().unwrap();
     let vault_file: PathBuf = dir.path().join("stale_vault.enc");
     let socket_file: PathBuf = dir.path().join("stale_daemon.sock");
     let binary = env!("CARGO_BIN_EXE_apiman");
@@ -700,4 +699,114 @@ fn test_tui_reveal_all_and_path_completion() {
     let (same, msg) = complete_path(&format!("{base}/zzz"));
     assert_eq!(same, format!("{base}/zzz"));
     assert_eq!(msg, "No matches");
+}
+
+#[test]
+fn test_tui_multiselect_bulk_edit() {
+    use apiman::tui::{app::App, input::handle_key};
+    use apiman::{cli::SessionContext, config::Config, storage};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn press(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::empty())
+    }
+    fn shifted(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::SHIFT)
+    }
+
+    let dir = tempdir().unwrap();
+    let vault_file: PathBuf = dir.path().join("bulk_vault.enc");
+    let socket_file: PathBuf = dir.path().join("bulk_daemon.sock");
+    let password = "bulk-test-password";
+
+    let (mut vault, key, salt) = storage::init_vault(password, &vault_file).unwrap();
+    for name in ["AAA_KEY", "BBB_KEY", "CCC_KEY"] {
+        vault.set(
+            name.to_string(),
+            format!("{name}-value").as_str().into(),
+            None,
+            Vec::new(),
+            None,
+        );
+    }
+    storage::save_vault(&vault, &key, &salt, &vault_file).unwrap();
+
+    let (vault, key, salt) = storage::load_vault_with_password(password, &vault_file).unwrap();
+    let ctx = SessionContext {
+        config: Config::default(),
+        vault_path: vault_file,
+        socket_path: socket_file,
+        master_key: key,
+        salt,
+        vault,
+    };
+    let mut app = App::new(ctx);
+    assert_eq!(app.filtered_indices.len(), 3);
+
+    // Shift+Down grows the group selection, Shift+Up shrinks it again
+    handle_key(&mut app, shifted(KeyCode::Down));
+    assert_eq!(app.marked.len(), 2);
+    assert!(app.in_group_mode());
+    handle_key(&mut app, shifted(KeyCode::Down));
+    assert_eq!(app.marked.len(), 3);
+    handle_key(&mut app, shifted(KeyCode::Up));
+    assert_eq!(app.marked.len(), 2);
+
+    // Plain navigation exits group mode
+    handle_key(&mut app, press(KeyCode::Down));
+    assert!(!app.in_group_mode());
+
+    // Select all three again and open bulk edit with `e`
+    handle_key(&mut app, press(KeyCode::Home));
+    handle_key(&mut app, shifted(KeyCode::Down));
+    handle_key(&mut app, shifted(KeyCode::Down));
+    assert_eq!(app.marked.len(), 3);
+    handle_key(&mut app, press(KeyCode::Char('e')));
+    assert_eq!(app.active_modal, apiman::tui::app::ActiveModal::BulkEdit);
+
+    // Fill bulk form via keystrokes (exercises cursor insertion too)
+    for c in "webapp".chars() {
+        handle_key(&mut app, press(KeyCode::Char(c)));
+    }
+    handle_key(&mut app, press(KeyCode::Tab));
+    for c in "prod,api".chars() {
+        handle_key(&mut app, press(KeyCode::Char(c)));
+    }
+    handle_key(&mut app, press(KeyCode::Enter));
+    assert_eq!(app.active_modal, apiman::tui::app::ActiveModal::None);
+    assert!(!app.in_group_mode());
+
+    // All entries moved to the project with replaced tags, values untouched
+    for name in ["AAA_KEY", "BBB_KEY", "CCC_KEY"] {
+        let entry = app.ctx.vault.get(name, Some("webapp")).unwrap();
+        assert_eq!(entry.value.expose_secret(), format!("{name}-value"));
+        assert_eq!(entry.tags, vec!["prod".to_string(), "api".to_string()]);
+    }
+
+    // Group delete removes every selected entry at once
+    handle_key(&mut app, press(KeyCode::Home));
+    handle_key(&mut app, shifted(KeyCode::Down));
+    handle_key(&mut app, shifted(KeyCode::Down));
+    handle_key(&mut app, press(KeyCode::Char('d')));
+    handle_key(&mut app, press(KeyCode::Char('y')));
+    assert_eq!(app.ctx.vault.entries.len(), 0);
+
+    // Esc clears an active group selection without deleting
+    let (mut vault, key, salt) =
+        storage::init_vault(password, &dir.path().join("bulk2.enc")).unwrap();
+    vault.set("SOLO".to_string(), "solo-value".into(), None, Vec::new(), None);
+    let ctx = SessionContext {
+        config: Config::default(),
+        vault_path: dir.path().join("bulk2.enc"),
+        socket_path: dir.path().join("bulk2.sock"),
+        master_key: key,
+        salt,
+        vault,
+    };
+    let mut app = App::new(ctx);
+    handle_key(&mut app, shifted(KeyCode::Down));
+    assert!(app.in_group_mode());
+    handle_key(&mut app, press(KeyCode::Esc));
+    assert!(!app.in_group_mode());
+    assert_eq!(app.ctx.vault.entries.len(), 1);
 }

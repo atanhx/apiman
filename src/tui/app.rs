@@ -11,6 +11,7 @@ pub enum ActiveModal {
     None,
     Add,
     Edit(usize),
+    BulkEdit,
     DeleteConfirm(usize),
     KeybindingsHelp,
     Search,
@@ -165,6 +166,13 @@ pub struct PathFormState {
     pub export_example: bool,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct BulkFormState {
+    pub project: TextField,
+    pub tags: TextField,
+    pub active_field: usize, // 0: Project, 1: Tags
+}
+
 impl PathFormState {
     pub fn active_field_mut(&mut self) -> &mut TextField {
         if self.active_field == 0 {
@@ -189,16 +197,39 @@ impl PathFormState {
     }
 }
 
+impl BulkFormState {
+    pub fn active_field_mut(&mut self) -> &mut TextField {
+        if self.active_field == 0 {
+            &mut self.project
+        } else {
+            &mut self.tags
+        }
+    }
+
+    pub fn next_field(&mut self) {
+        self.active_field = (self.active_field + 1) % 2;
+        self.active_field_mut().move_end();
+    }
+
+    pub fn prev_field(&mut self) {
+        self.active_field = if self.active_field == 0 { 1 } else { 0 };
+        self.active_field_mut().move_end();
+    }
+}
+
 pub struct App {
     pub ctx: SessionContext,
     pub filtered_indices: Vec<usize>,
     pub selected_index: usize,
     pub revealed_entries: HashSet<String>,
+    pub marked: HashSet<usize>, // real vault indices in group-select mode
+    pub selection_anchor: Option<usize>, // filtered-list position where group select started
     pub search_query: TextField,
     pub project_filter: Option<String>,
     pub active_modal: ActiveModal,
     pub form_state: FormState,
     pub path_form: PathFormState,
+    pub bulk_form: BulkFormState,
     pub delete_choice_delete: bool,
     pub status_message: Option<(String, Instant)>,
     pub should_quit: bool,
@@ -211,11 +242,14 @@ impl App {
             filtered_indices: Vec::new(),
             selected_index: 0,
             revealed_entries: HashSet::new(),
+            marked: HashSet::new(),
+            selection_anchor: None,
             search_query: TextField::default(),
             project_filter: None,
             active_modal: ActiveModal::None,
             form_state: FormState::default(),
             path_form: PathFormState::default(),
+            bulk_form: BulkFormState::default(),
             delete_choice_delete: true,
             status_message: None,
             should_quit: false,
@@ -225,6 +259,10 @@ impl App {
     }
 
     pub fn update_filtered_indices(&mut self) {
+        // Any change to the visible list invalidates group selection.
+        self.marked.clear();
+        self.selection_anchor = None;
+
         let query = self.search_query.text.trim().to_lowercase();
         let proj_filter = self.project_filter.as_deref();
 
@@ -353,9 +391,42 @@ impl App {
         if self.filtered_indices.is_empty() {
             return;
         }
+        self.clear_selection();
         let len = self.filtered_indices.len() as isize;
         let next = (self.selected_index as isize + delta).clamp(0, len - 1);
         self.selected_index = next as usize;
+    }
+
+    pub fn clear_selection(&mut self) {
+        self.marked.clear();
+        self.selection_anchor = None;
+    }
+
+    pub fn extend_selection(&mut self, delta: isize) {
+        if self.filtered_indices.is_empty() {
+            return;
+        }
+        let len = self.filtered_indices.len();
+        let anchor = match self.selection_anchor {
+            Some(a) => a,
+            None => {
+                let a = self.selected_index;
+                self.selection_anchor = Some(a);
+                a
+            }
+        };
+        let cursor = ((self.selected_index as isize + delta).clamp(0, len as isize - 1)) as usize;
+        self.selected_index = cursor;
+        let (lo, hi) = if anchor <= cursor {
+            (anchor, cursor)
+        } else {
+            (cursor, anchor)
+        };
+        self.marked = self.filtered_indices[lo..=hi].iter().copied().collect();
+    }
+
+    pub fn in_group_mode(&self) -> bool {
+        !self.marked.is_empty()
     }
 
     pub fn save_form(&mut self) -> Result<(), String> {
@@ -428,6 +499,22 @@ impl App {
     }
 
     pub fn delete_selected_entry(&mut self) -> Result<(), String> {
+        if !self.marked.is_empty() {
+            let mut idxs: Vec<usize> = self.marked.iter().copied().collect();
+            idxs.sort_unstable_by(|a, b| b.cmp(a));
+            let mut removed = 0;
+            for i in idxs {
+                if i < self.ctx.vault.entries.len() {
+                    self.ctx.vault.entries.remove(i);
+                    removed += 1;
+                }
+            }
+            self.ctx.save().map_err(|e| e.to_string())?;
+            self.set_status(format!("Deleted {removed} secrets"));
+            self.active_modal = ActiveModal::None;
+            self.update_filtered_indices();
+            return Ok(());
+        }
         if let ActiveModal::DeleteConfirm(real_idx) = self.active_modal {
             if real_idx < self.ctx.vault.entries.len() {
                 let name = self.ctx.vault.entries[real_idx].name.clone();
@@ -438,6 +525,55 @@ impl App {
         }
         self.active_modal = ActiveModal::None;
         self.update_filtered_indices();
+        Ok(())
+    }
+
+    pub fn apply_bulk_edit(&mut self) -> Result<(), String> {
+        if self.marked.is_empty() {
+            return Err("No entries selected".to_string());
+        }
+
+        let proj = self.bulk_form.project.text.trim().to_string();
+        let change_project = !proj.is_empty();
+        let new_project = if proj.eq_ignore_ascii_case("global") {
+            None
+        } else {
+            Some(proj)
+        };
+
+        let tags_raw = self.bulk_form.tags.text.trim().to_string();
+        let change_tags = !tags_raw.is_empty();
+        let new_tags: Vec<String> = tags_raw
+            .split(',')
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty())
+            .collect();
+
+        if !change_project && !change_tags {
+            return Err("Nothing to change (both fields blank keep current values)".to_string());
+        }
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let mut updated = 0;
+        for &i in self.marked.iter() {
+            if let Some(entry) = self.ctx.vault.entries.get_mut(i) {
+                if change_project {
+                    entry.project = new_project.clone();
+                }
+                if change_tags {
+                    entry.tags = new_tags.clone();
+                }
+                entry.updated_at = now;
+                updated += 1;
+            }
+        }
+        self.ctx.save().map_err(|e| e.to_string())?;
+        self.active_modal = ActiveModal::None;
+        self.update_filtered_indices();
+        self.set_status(format!("Updated {updated} secrets (values untouched)"));
         Ok(())
     }
 

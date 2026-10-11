@@ -32,6 +32,7 @@ pub fn render(frame: &mut Frame, app: &App) {
     match &app.active_modal {
         ActiveModal::KeybindingsHelp => render_help_modal(frame),
         ActiveModal::Add | ActiveModal::Edit(_) => render_form_modal(frame, app),
+        ActiveModal::BulkEdit => render_bulk_modal(frame, app),
         ActiveModal::DeleteConfirm(_) => render_delete_modal(frame, app),
         ActiveModal::Import => render_import_modal(frame, app),
         ActiveModal::Export => render_export_modal(frame, app),
@@ -43,8 +44,9 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
     let proj_label = app.project_filter.as_deref().unwrap_or("all");
     let total_count = app.ctx.vault.entries.len();
     let filtered_count = app.filtered_indices.len();
+    let selected_count = app.marked.len();
 
-    let header_text = vec![Line::from(vec![
+    let mut spans = vec![
         Span::styled(
             " APIMAN ",
             Style::default()
@@ -73,18 +75,30 @@ fn render_header(frame: &mut Frame, app: &App, area: Rect) {
                 .fg(Color::White)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(" | State: ", Style::default().fg(Color::White)),
-        Span::styled(
-            if app.ctx.config.auto_lock_timeout_seconds == 0 {
-                "Unlocked (Always)"
-            } else {
-                "Unlocked"
-            },
+    ];
+    if selected_count > 0 {
+        spans.push(Span::styled(" | Sel: ", Style::default().fg(Color::White)));
+        spans.push(Span::styled(
+            format!("{selected_count}"),
             Style::default()
-                .fg(ACCENT_AMBER)
+                .fg(Color::Black)
+                .bg(ACCENT_ORANGE)
                 .add_modifier(Modifier::BOLD),
-        ),
-    ])];
+        ));
+    }
+    spans.push(Span::styled(" | State: ", Style::default().fg(Color::White)));
+    spans.push(Span::styled(
+        if app.ctx.config.auto_lock_timeout_seconds == 0 {
+            "Unlocked (Always)"
+        } else {
+            "Unlocked"
+        },
+        Style::default()
+            .fg(ACCENT_AMBER)
+            .add_modifier(Modifier::BOLD),
+    ));
+
+    let header_text = vec![Line::from(spans)];
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -130,17 +144,24 @@ fn render_table(frame: &mut Frame, app: &App, area: Rect) {
             };
             let desc_str = entry.description.as_deref().unwrap_or("-");
 
+            let is_marked = app.marked.contains(&real_idx);
             let style = if is_selected {
                 Style::default()
                     .bg(ROW_HIGHLIGHT_BG)
                     .fg(Color::White)
                     .add_modifier(Modifier::BOLD)
+            } else if is_marked {
+                Style::default()
+                    .bg(Color::Rgb(70, 45, 20))
+                    .fg(Color::White)
             } else {
                 Style::default().fg(Color::White)
             };
 
             let name_cell = if is_selected {
                 format!(">> {}", entry.name)
+            } else if is_marked {
+                format!(" + {}", entry.name)
             } else {
                 format!("   {}", entry.name)
             };
@@ -148,7 +169,7 @@ fn render_table(frame: &mut Frame, app: &App, area: Rect) {
             let cells = vec![
                 Span::styled(
                     name_cell,
-                    if is_selected {
+                    if is_selected || is_marked {
                         Style::default()
                             .fg(ACCENT_ORANGE)
                             .add_modifier(Modifier::BOLD)
@@ -207,8 +228,7 @@ fn render_table(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
-    let content = if app.active_modal == ActiveModal::Search {
-        Line::from(vec![
+    let content = if app.active_modal == ActiveModal::Search {        Line::from(vec![
             Span::styled(
                 " SEARCH: ",
                 Style::default()
@@ -226,6 +246,23 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
             Span::styled(
                 "  [Enter/Down] Done | [Up/Down] Move | [Esc] Clear",
                 Style::default().fg(Color::White),
+            ),
+        ])
+    } else if app.in_group_mode() {
+        Line::from(vec![
+            Span::styled(
+                format!(" GROUP ({} selected): ", app.marked.len()),
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(ACCENT_ORANGE)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" "),
+            Span::styled(
+                "[e] Bulk Edit Project/Tags  [d] Delete All  [Esc] Clear",
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
             ),
         ])
     } else if let Some(toast) = app.status_text() {
@@ -390,6 +427,8 @@ fn render_help_modal(frame: &mut Frame) {
         Line::from(Span::styled("  c                   Copy selected secret value to clipboard", Style::default().fg(Color::White))),
         Line::from(Span::styled("  Space / v           Toggle masked (••••) vs plaintext reveal (single entry)", Style::default().fg(Color::White))),
         Line::from(Span::styled("  Shift+Space or *    Reveal / mask ALL currently visible secrets", Style::default().fg(Color::White))),
+        Line::from(Span::styled("  Shift+Up / Shift+Down  Select multiple entries (group mode)", Style::default().fg(Color::White))),
+        Line::from(Span::styled("    (in group mode: e = bulk edit project/tags, d = delete all, Esc = clear)", Style::default().fg(Color::White))),
         Line::from(Span::styled("  a                   Open Add Secret form modal", Style::default().fg(Color::White))),
         Line::from(Span::styled("  e                   Edit selected secret details", Style::default().fg(Color::White))),
         Line::from(Span::styled("    (in forms: Tab/Up/Down switch fields, Left/Right/Home/End move cursor)", Style::default().fg(Color::White))),
@@ -633,21 +672,7 @@ fn field_block(title: &'static str, is_active: bool) -> Block<'static> {
     }
 }
 
-fn render_delete_modal(frame: &mut Frame, app: &App) {
-    let area = centered_rect(50, 30, frame.area());
-    frame.render_widget(Clear, area);
-
-    let name = if let ActiveModal::DeleteConfirm(real_idx) = app.active_modal {
-        app.ctx
-            .vault
-            .entries
-            .get(real_idx)
-            .map(|e| e.name.as_str())
-            .unwrap_or("")
-    } else {
-        ""
-    };
-
+fn delete_choice_line(app: &App) -> Line<'static> {
     let confirm_style = if app.delete_choice_delete {
         Style::default()
             .fg(Color::White)
@@ -664,31 +689,86 @@ fn render_delete_modal(frame: &mut Frame, app: &App) {
             .bg(ACCENT_ORANGE)
             .add_modifier(Modifier::BOLD)
     };
+    Line::from(vec![
+        Span::styled(" [y] Delete ", confirm_style),
+        Span::raw("   "),
+        Span::styled(" [n] Cancel ", cancel_style),
+    ])
+}
 
-    let text = vec![
-        Line::from(""),
-        Line::from(vec![
-            Span::styled("Permanently delete secret '", Style::default().fg(Color::White)),
-            Span::styled(
-                name,
-                Style::default()
-                    .fg(ACCENT_ORANGE)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("' ?", Style::default().fg(Color::White)),
-        ]),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled(" [y] Delete ", confirm_style),
-            Span::raw("   "),
-            Span::styled(" [n] Cancel ", cancel_style),
-        ]),
-        Line::from(""),
-        Line::from(vec![Span::styled(
-            "[Left/Right] Choose | [Enter] Confirm | [Esc] Cancel",
-            Style::default().fg(Color::White),
-        )]),
-    ];
+fn render_delete_modal(frame: &mut Frame, app: &App) {
+    let area = centered_rect(50, 32, frame.area());
+    frame.render_widget(Clear, area);
+
+    let name = if let ActiveModal::DeleteConfirm(real_idx) = app.active_modal {
+        app.ctx
+            .vault
+            .entries
+            .get(real_idx)
+            .map(|e| e.name.as_str())
+            .unwrap_or("")
+    } else {
+        ""
+    };
+
+    let text = if !app.marked.is_empty() {
+        let mut names: Vec<&str> = app
+            .marked
+            .iter()
+            .filter_map(|&i| app.ctx.vault.entries.get(i))
+            .map(|e| e.name.as_str())
+            .collect();
+        names.sort();
+        let shown = names.iter().take(5).copied().collect::<Vec<_>>().join(", ");
+        let more = if names.len() > 5 {
+            format!(" (+{} more)", names.len() - 5)
+        } else {
+            String::new()
+        };
+        vec![
+            Line::from(""),
+            Line::from(vec![
+                Span::styled(
+                    format!("Permanently delete {} secrets?", names.len()),
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]),
+            Line::from(vec![Span::styled(
+                format!("{shown}{more}"),
+                Style::default().fg(ACCENT_ORANGE),
+            )]),
+            Line::from(""),
+            delete_choice_line(app),
+            Line::from(""),
+            Line::from(vec![Span::styled(
+                "[Left/Right] Choose | [Enter] Confirm | [Esc] Cancel",
+                Style::default().fg(Color::White),
+            )]),
+        ]
+    } else {
+        vec![
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("Permanently delete secret '", Style::default().fg(Color::White)),
+                Span::styled(
+                    name,
+                    Style::default()
+                        .fg(ACCENT_ORANGE)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("' ?", Style::default().fg(Color::White)),
+            ]),
+            Line::from(""),
+            delete_choice_line(app),
+            Line::from(""),
+            Line::from(vec![Span::styled(
+                "[Left/Right] Choose | [Enter] Confirm | [Esc] Cancel",
+                Style::default().fg(Color::White),
+            )]),
+        ]
+    };
 
     let block = Block::default()
         .title(Span::styled(
@@ -701,6 +781,77 @@ fn render_delete_modal(frame: &mut Frame, app: &App) {
 
     let paragraph = Paragraph::new(text).alignment(Alignment::Center).block(block);
     frame.render_widget(paragraph, area);
+}
+
+fn render_bulk_modal(frame: &mut Frame, app: &App) {
+    let count = app.marked.len();
+    let area = centered_rect(62, 40, frame.area());
+    frame.render_widget(Clear, area);
+
+    let active = app.bulk_form.active_field;
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .margin(1)
+        .constraints([
+            Constraint::Length(3), // Project
+            Constraint::Length(3), // Tags
+            Constraint::Length(3), // Hint
+        ])
+        .split(area);
+
+    let proj_text = if active == 0 {
+        app.bulk_form.project.with_cursor_marker(false)
+    } else {
+        app.bulk_form.project.text.clone()
+    };
+    let proj_widget = Paragraph::new(proj_text)
+        .style(
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        )
+        .block(field_block(" Project (blank = keep, 'global' = global) ", active == 0));
+    frame.render_widget(proj_widget, chunks[0]);
+
+    let tags_text = if active == 1 {
+        app.bulk_form.tags.with_cursor_marker(false)
+    } else {
+        app.bulk_form.tags.text.clone()
+    };
+    let tags_widget = Paragraph::new(tags_text)
+        .style(
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        )
+        .block(field_block(" Tags (blank = keep, comma-separated replace) ", active == 1));
+    frame.render_widget(tags_widget, chunks[1]);
+
+    let hints = Line::from(vec![
+        Span::styled("[Tab]", Style::default().fg(ACCENT_ORANGE).add_modifier(Modifier::BOLD)),
+        Span::styled(" Next | ", Style::default().fg(Color::White)),
+        Span::styled("[Ctrl+S]", Style::default().fg(ACCENT_ORANGE).add_modifier(Modifier::BOLD)),
+        Span::styled(" Apply | ", Style::default().fg(Color::White)),
+        Span::styled("[Esc]", Style::default().fg(ACCENT_RED).add_modifier(Modifier::BOLD)),
+        Span::styled(" Cancel", Style::default().fg(Color::White)),
+    ]);
+    frame.render_widget(
+        Paragraph::new(hints).alignment(Alignment::Center),
+        chunks[2],
+    );
+
+    let outer_block = Block::default()
+        .title(Span::styled(
+            format!(" Bulk Edit {count} Entries (values untouched) "),
+            Style::default()
+                .fg(ACCENT_ORANGE)
+                .add_modifier(Modifier::BOLD),
+        ))
+        .title_alignment(Alignment::Center)
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(ACCENT_ORANGE).add_modifier(Modifier::BOLD));
+    frame.render_widget(outer_block, area);
 }
 
 fn render_import_modal(frame: &mut Frame, app: &App) {

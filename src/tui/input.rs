@@ -8,6 +8,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         ActiveModal::DeleteConfirm(_) => handle_delete_key(app, key),
         ActiveModal::Search => handle_search_key(app, key),
         ActiveModal::Add | ActiveModal::Edit(_) => handle_form_key(app, key),
+        ActiveModal::BulkEdit => handle_bulk_key(app, key),
         ActiveModal::Import | ActiveModal::Export => handle_path_form_key(app, key),
         ActiveModal::None => handle_normal_key(app, key),
     }
@@ -45,10 +46,18 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) {
             app.should_quit = true;
         }
         KeyCode::Char('j') | KeyCode::Down => {
-            app.move_selection(1);
+            if key.modifiers.contains(KeyModifiers::SHIFT) {
+                app.extend_selection(1);
+            } else {
+                app.move_selection(1);
+            }
         }
         KeyCode::Char('k') | KeyCode::Up => {
-            app.move_selection(-1);
+            if key.modifiers.contains(KeyModifiers::SHIFT) {
+                app.extend_selection(-1);
+            } else {
+                app.move_selection(-1);
+            }
         }
         KeyCode::Left | KeyCode::Right => {
             app.cycle_project_filter();
@@ -60,9 +69,11 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) {
             app.move_selection(-10);
         }
         KeyCode::Home | KeyCode::Char('g') => {
+            app.clear_selection();
             app.selected_index = 0;
         }
         KeyCode::End | KeyCode::Char('G') => {
+            app.clear_selection();
             if !app.filtered_indices.is_empty() {
                 app.selected_index = app.filtered_indices.len() - 1;
             }
@@ -95,7 +106,10 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) {
             app.active_modal = ActiveModal::Add;
         }
         KeyCode::Char('e') => {
-            if !app.filtered_indices.is_empty() {
+            if app.in_group_mode() {
+                app.bulk_form = crate::tui::app::BulkFormState::default();
+                app.active_modal = ActiveModal::BulkEdit;
+            } else if !app.filtered_indices.is_empty() {
                 let real_idx = app.filtered_indices[app.selected_index];
                 if let Some(entry) = app.ctx.vault.entries.get(real_idx) {
                     app.form_state = crate::tui::app::FormState::from_entry(entry);
@@ -104,7 +118,11 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) {
             }
         }
         KeyCode::Char('d') | KeyCode::Delete => {
-            if !app.filtered_indices.is_empty() {
+            if app.in_group_mode() {
+                app.delete_choice_delete = true;
+                let real_idx = app.filtered_indices[app.selected_index];
+                app.active_modal = ActiveModal::DeleteConfirm(real_idx);
+            } else if !app.filtered_indices.is_empty() {
                 let real_idx = app.filtered_indices[app.selected_index];
                 app.delete_choice_delete = true;
                 app.active_modal = ActiveModal::DeleteConfirm(real_idx);
@@ -127,7 +145,9 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) {
             app.should_quit = true;
         }
         KeyCode::Esc => {
-            if !app.search_query.text.is_empty() {
+            if app.in_group_mode() {
+                app.clear_selection();
+            } else if !app.search_query.text.is_empty() {
                 app.search_query = TextField::default();
                 app.update_filtered_indices();
             }
@@ -281,8 +301,59 @@ fn handle_form_key(app: &mut App, key: KeyEvent) {
     }
 }
 
-fn handle_path_form_key(app: &mut App, key: KeyEvent) {
-    let is_export = app.active_modal == ActiveModal::Export;
+fn handle_bulk_key(app: &mut App, key: KeyEvent) {
+    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('s') {
+        if let Err(e) = app.apply_bulk_edit() {
+            app.set_status(format!("Validation error: {e}"));
+        }
+        return;
+    }
+
+    match key.code {
+        KeyCode::Esc => {
+            app.active_modal = ActiveModal::None;
+        }
+        KeyCode::Tab | KeyCode::Down => {
+            app.bulk_form.next_field();
+        }
+        KeyCode::BackTab | KeyCode::Up => {
+            app.bulk_form.prev_field();
+        }
+        KeyCode::Left => {
+            app.bulk_form.active_field_mut().move_left();
+        }
+        KeyCode::Right => {
+            app.bulk_form.active_field_mut().move_right();
+        }
+        KeyCode::Home => {
+            app.bulk_form.active_field_mut().move_home();
+        }
+        KeyCode::End => {
+            app.bulk_form.active_field_mut().move_end();
+        }
+        KeyCode::Enter => {
+            if app.bulk_form.active_field == 1 {
+                if let Err(e) = app.apply_bulk_edit() {
+                    app.set_status(format!("Validation error: {e}"));
+                }
+            } else {
+                app.bulk_form.next_field();
+            }
+        }
+        KeyCode::Backspace => {
+            app.bulk_form.active_field_mut().backspace();
+        }
+        KeyCode::Delete => {
+            app.bulk_form.active_field_mut().delete_at_cursor();
+        }
+        KeyCode::Char(c) => {
+            app.bulk_form.active_field_mut().insert_char(c);
+        }
+        _ => {}
+    }
+}
+
+fn handle_path_form_key(app: &mut App, key: KeyEvent) {    let is_export = app.active_modal == ActiveModal::Export;
     let max_fields = 2;
 
     match key.code {
