@@ -426,7 +426,7 @@ fn render_help_modal(frame: &mut Frame) {
         )]),
         Line::from(Span::styled("  c                   Copy selected secret value to clipboard", Style::default().fg(Color::White))),
         Line::from(Span::styled("  Space / v           Toggle masked (••••) vs plaintext reveal (single entry)", Style::default().fg(Color::White))),
-        Line::from(Span::styled("  Shift+Space or *    Reveal / mask ALL currently visible secrets", Style::default().fg(Color::White))),
+        Line::from(Span::styled("  Shift+Space / * / V   Reveal / mask ALL currently visible secrets", Style::default().fg(Color::White))),
         Line::from(Span::styled("  Shift+Up / Shift+Down  Select multiple entries (group mode)", Style::default().fg(Color::White))),
         Line::from(Span::styled("    (in group mode: e = bulk edit project/tags, d = delete all, Esc = clear)", Style::default().fg(Color::White))),
         Line::from(Span::styled("  a                   Open Add Secret form modal", Style::default().fg(Color::White))),

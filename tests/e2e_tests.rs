@@ -620,8 +620,9 @@ fn test_stale_daemon_self_heal() {    let dir = tempdir().unwrap();
 
 #[test]
 fn test_tui_reveal_all_and_path_completion() {
-    use apiman::tui::app::{complete_path, App, TextField};
+    use apiman::tui::{app::App, input::handle_key};
     use apiman::{cli::SessionContext, config::Config, storage};
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
     let dir = tempdir().unwrap();
     let vault_file: PathBuf = dir.path().join("reveal_vault.enc");
@@ -658,6 +659,7 @@ fn test_tui_reveal_all_and_path_completion() {
         salt,
         vault,
     };
+    use apiman::tui::app::{complete_path, TextField};
     let mut app = App::new(ctx);
     assert_eq!(app.filtered_indices.len(), 2);
     assert!(app.revealed_entries.is_empty());
@@ -668,13 +670,27 @@ fn test_tui_reveal_all_and_path_completion() {
     app.toggle_reveal_all();
     assert!(app.revealed_entries.is_empty());
 
+    // Same behavior through the actual keybindings: `*`, `V`, and Shift+Space
+    let plain_space = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::empty());
+    let shift_space = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::SHIFT);
+    handle_key(&mut app, KeyEvent::new(KeyCode::Char('*'), KeyModifiers::empty()));
+    assert_eq!(app.revealed_entries.len(), 2);
+    handle_key(&mut app, KeyEvent::new(KeyCode::Char('V'), KeyModifiers::empty()));
+    assert!(app.revealed_entries.is_empty());
+    handle_key(&mut app, shift_space);
+    assert_eq!(app.revealed_entries.len(), 2);
+    // Plain Space without Shift still toggles only the single selected entry
+    handle_key(&mut app, plain_space);
+    assert_eq!(app.revealed_entries.len(), 1);
+
     // Reveal-all respects the active search filter
     app.search_query = TextField::new("first".to_string());
     app.update_filtered_indices();
     assert_eq!(app.filtered_indices.len(), 1);
-    app.toggle_reveal_all();
-    assert_eq!(app.revealed_entries.len(), 1);
+    let visible_id = app.selected_entry().unwrap().id.clone();
     assert_eq!(app.selected_entry().unwrap().name, "FIRST_KEY");
+    app.toggle_reveal_all();
+    assert!(app.revealed_entries.contains(&visible_id));
 
     // Path completion: single match completes, multi-match extends common prefix
     let comp_dir = dir.path().join("complete");

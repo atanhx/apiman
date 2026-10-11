@@ -91,7 +91,7 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) {
         KeyCode::Char('v') => {
             app.toggle_selected_reveal();
         }
-        KeyCode::Char('*') => {
+        KeyCode::Char('*') | KeyCode::Char('V') => {
             app.toggle_reveal_all();
         }
         KeyCode::Char('a') => {
