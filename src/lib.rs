@@ -1,3 +1,4 @@
+pub mod agent;
 pub mod cli;
 pub mod clipboard;
 pub mod config;
@@ -5,6 +6,8 @@ pub mod crypto;
 pub mod daemon;
 pub mod dotenv;
 pub mod install;
+pub mod proxy;
+pub mod runner;
 pub mod security;
 pub mod storage;
 pub mod tui;
