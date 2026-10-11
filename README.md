@@ -1,227 +1,332 @@
 # apiman
 
-Minimal, secure API credential and secret manager for Linux, macOS, and Windows.
+A small, local secret manager for API keys and credentials. Secrets are kept in
+an encrypted vault and used through a terminal UI, a CLI, a process runner that
+injects them into one command, and a local auth proxy that lets apps and AI
+agents call APIs without ever holding the key.
 
-Features an interactive TUI (Ratatui) with a warm amber/orange accent theme, CLI subcommands, subprocess environment variable injection, terminal leak prevention, and an in-memory session daemon with auto-lock.
+Built and tested on Linux. macOS is supported when building from source.
 
-## Features
+## Contents
 
-- **Security & Cryptography:** Argon2id key derivation + XChaCha20-Poly1305 authenticated encryption.
-- **In-Memory Hardening:** Sensitive strings wrapped with `zeroize` on drop, redacted debug output, memory page locking via `mlock`, and disabled core dumps via Linux `prctl`.
-- **Zero-Leak Subprocess Runner:** `apiman run -- <command>` injects secrets directly into child process memory without writing to disk or shell history.
-- **Console Leak Prevention:** `apiman get <key>` prevents accidental printing to interactive terminals unless `--allow-view` is passed. Piping (`|`) works automatically without warnings.
-- **In-Memory Session Daemon:** Caches master key in RAM via an ephemeral local Unix socket with a configurable auto-lock inactivity timer.
-- **Interactive TUI:** Built with Ratatui; opens by default when running `apiman`. Features live search, masked secret viewing, and modal forms.
-- **Single Command Installation:** Install to `~/.local/bin/apiman` with `apiman install` and remove with `apiman uninstall`.
-- **Master Password Modification:** Change master password with `apiman passwd` without losing any stored credentials.
+- [Install](#install)
+- [Quick start](#quick-start)
+- [Using secrets in programs](#using-secrets-in-programs)
+- [AI agents](#ai-agents)
+- [Terminal UI](#terminal-ui)
+- [CLI reference](#cli-reference)
+- [Configuration](#configuration)
+- [Security](#security)
+- [Development](#development)
+- [License](#license)
 
-## Compilation & Installation
+## Install
 
-### Quick Build & Install
+### Option 1: release binary (Linux x86_64)
+
+A static binary that runs on any x86_64 Linux distribution:
 
 ```bash
+curl -LO https://github.com/atanhx/apiman/releases/latest/download/apiman-x86_64-unknown-linux-musl.tar.gz
+curl -LO https://github.com/atanhx/apiman/releases/latest/download/apiman-x86_64-unknown-linux-musl.tar.gz.sha256
+sha256sum -c apiman-x86_64-unknown-linux-musl.tar.gz.sha256
+tar -xzf apiman-x86_64-unknown-linux-musl.tar.gz
+./apiman install
+```
+
+### Option 2: build from source
+
+Requires Rust 1.88 or newer.
+
+```bash
+git clone https://github.com/atanhx/apiman.git
+cd apiman
 cargo build --release
 ./target/release/apiman install
 ```
 
-`apiman install` force-copies the current binary to `~/.local/bin/apiman` (overwriting any previous install, creating the directory if needed, mode `0755`).
-
-Install to a custom directory instead:
+Or install with Cargo directly:
 
 ```bash
-apiman install ~/bin
-apiman install /usr/local/bin
+cargo install --path .
 ```
 
-If the target directory is not in your `PATH` (including `~/.local/bin` for the default install), `apiman` warns you and prints the `export PATH=...` line to add to `~/.bashrc` or `~/.zshrc`.
+### Install location
 
-To check installation status:
+`apiman install` copies the binary to `~/.local/bin/apiman` (or a directory you
+pass, for example `apiman install ~/bin`). It warns if that directory is not on
+your `PATH`. Remove it with `apiman uninstall`.
+
+Shell completions:
+
 ```bash
-apiman status
+apiman completions bash > ~/.local/share/bash-completion/completions/apiman
+apiman completions zsh  > ~/.zfunc/_apiman
+apiman completions fish > ~/.config/fish/completions/apiman.fish
 ```
 
-To remove the installed binary:
+## Quick start
+
 ```bash
-apiman uninstall
-apiman uninstall ~/bin   # match a custom install directory
+apiman init                          # create the vault and choose a master password
+apiman set OPENAI_API_KEY            # prompts for the value without echo
+apiman set STRIPE_KEY --project billing --tags payment,prod
+apiman list                          # names, projects, tags; never values
+apiman                               # open the terminal UI
 ```
 
-## Running Tests
+The vault unlocks once per session. A background daemon keeps the key in memory
+and locks after 15 minutes of inactivity (`apiman timeout 30m`, or `none`).
+`apiman lock` locks immediately.
 
-Runs the comprehensive end-to-end integration test suite:
+## Using secrets in programs
+
+### Run a command with secrets
 
 ```bash
-cargo test
+apiman run -- node server.js                       # all global secrets
+apiman run --project billing -- python app.py      # globals plus the billing project
+apiman run --only OPENAI_API_KEY -- pytest         # only the secrets the command needs
+apiman run --mask -- ./ci.sh                       # hide values in the command's output
 ```
 
-## Quick Start
+The program receives the values in its environment. Nothing is written to disk
+or shell history.
 
-### 1. Launch TUI (Default Mode)
+### Reference secrets instead of storing them in files
 
-Running `apiman` with no arguments launches the TUI. If no vault exists, it prompts to initialize one:
+An `apiman://` reference points to a secret without containing it, so it is safe
+to commit:
 
 ```bash
-apiman
+apiman export --project backend --format refs --output .env.apiman
+apiman run --env-file .env.apiman -- npm start
 ```
 
-#### TUI Keybindings
+`.env.apiman` looks like this:
 
-- `Ctrl+K` or `?`: Show keybindings help modal
-- `Ctrl+F` or `/`: Search and filter entries across names, tags, and projects
-  (inside search: `Left`/`Right` move the cursor, `Up`/`Down` move selection)
-- `Up` / `Down` or `j` / `k`: Move selection (`PgUp`/`PgDn` jump 10, `Home`/`End` jump to ends)
-- `Left` / `Right`: Cycle project scope filter (`all` -> `global` -> projects)
-- `c`: Copy selected secret value to clipboard (supports Wayland `wl-copy`, X11, macOS, and OSC 52)
-- `Space` or `v`: Toggle masked (`••••••••`) vs revealed secret value (single entry)
-- `Shift+Space` or `*` or `V`: Reveal / mask ALL currently visible secrets at once
-- `Shift+Up` / `Shift+Down`: Select multiple entries (group mode, marked with `+`)
-- `Tab`: Pin/unpin single entries anywhere and advance (pick 1, 4, 6...); composes with Shift-ranges. Selections persist across plain navigation — only `Esc` or filter changes clear them
-  - In group mode: `Space` reveals/masks the marked entries, `e` bulk-edits project/tags for all selected (values are never touched — blank fields keep current values, `global` moves entries to global scope), `d` deletes all selected, `Esc` clears the selection
-- `a`: Add new secret entry (interactive form modal)
-- `e`: Edit selected entry
-- `d` or `Delete`: Delete selected entry (`Left`/`Right` + `Enter` to confirm)
-- `i`: Import secrets from a `.env` file
-- `X` (Shift+X): Export visible secrets to a `.env` file (or safe `.env.example` template)
-- `p`: Cycle project filter
-- `j` / `k`: Navigate list (vim-style)
-- `l`: Lock vault and exit
-- `q` or `Ctrl+C`: Quit TUI (Ctrl+C works from inside any dialog too)
-
-Inside any form modal: `Tab` / `Up` / `Down` switch fields, `Left` / `Right` / `Home` / `End` move the text cursor, `Delete` removes the character under the cursor, `Ctrl+S` saves, `Esc` cancels.
-
-### 2. CLI Usage
-
-#### Initialize Vault
-```bash
-apiman init
+```
+DATABASE_URL=apiman://backend/DATABASE_URL
+OPENAI_API_KEY=apiman://OPENAI_API_KEY
+PORT=3000
 ```
 
-#### Store Secrets
-```bash
-# Global secret (prompted securely for value without echo)
-apiman set OPENAI_API_KEY
+References also work in environment variables (`export TOKEN=apiman://TOKEN`)
+and are resolved by `apiman run`.
 
-# Project-scoped secret with tags and description
-apiman set STRIPE_SECRET_KEY "sk_live_123" --project billing --tags payment,prod --description "Stripe production key"
-```
-
-#### Retrieve Secrets
-```bash
-# Direct terminal display (requires explicit --allow-view to prevent shoulder surfing)
-apiman get OPENAI_API_KEY --allow-view
-
-# Retrieve project secret directly (searched across all projects automatically)
-apiman get STRIPE_SECRET_KEY --allow-view
-
-# Pipe to clipboard or another command (raw value, no warning)
-apiman get OPENAI_API_KEY | wl-copy
-apiman get GITHUB_TOKEN | gh auth login --with-token
-```
-
-#### List Secrets
-```bash
-# Table format (secret values are never displayed)
-apiman list
-
-# Filter by project or tag
-apiman list --project billing --tag prod
-
-# JSON output
-apiman list --format json
-```
-
-#### Run Applications Securely (Subprocess Injection)
-`apiman run` executes an external program with matching secrets injected into its environment variables in RAM:
+### Read, copy, import and export
 
 ```bash
-# Injects global secrets into child process environment
-apiman run -- node server.js
-
-# Injects project-specific secrets (overriding globals on conflict)
-apiman run --project billing -- python main.py
-
-# Filter by tag
-apiman run --project billing --tag prod -- npm start
-
-# Execute a shell pipeline or curl command
-apiman run -- sh -c 'curl -H "Authorization: Bearer $OPENAI_API_KEY" https://api.openai.com/v1/models'
-```
-
-#### Import Secrets From .env Files
-```bash
-# Import every KEY=VALUE pair as a global secret
-apiman import ./.env
-
-# Import into a project scope with tags
-apiman import ./backend/.env --project backend --tags prod
-
-# .env.example files work too (empty placeholders are skipped)
-apiman import ./.env.example --project myapp
-```
-Supports `export KEY=...` prefixes, single/double quotes, `\n` escapes, `#` comments, and reports skipped lines. Existing entries are updated in place.
-
-#### Export Secrets To .env Files
-```bash
-# Write project secrets (with global fallback) to a file (0600 permissions)
+apiman get OPENAI_API_KEY | gh auth login --with-token   # piped output is the raw value
+apiman get OPENAI_API_KEY --allow-view                   # print to a terminal on purpose
+apiman copy OPENAI_API_KEY                               # clipboard, cleared after 30s
+apiman import ./.env --project backend
 apiman export --project backend --output ./backend/.env
-
-# Point at a folder to auto-save apiman-export.env inside it
-apiman export --project backend --output /home/um/Downloads/
-
-# Generate a safe .env.example template (keys only, no secret values)
-apiman export --format example --output ./.env.example
-
-# Pipe to another tool (raw KEY=VALUE lines)
-apiman export --project billing | wl-copy
-```
-In the TUI, press `i` to import or `X` to export whatever is currently visible (respects search + scope filter). Path fields show grey placeholder examples and support `Tab` filesystem autocompletion.
-
-#### Delete a Secret
-```bash
-apiman delete STRIPE_SECRET_KEY --project billing
-```
-Delete resolves the same way `get` does (explicit scope, then global, then any project; case-insensitive), so the entry `get` finds is the entry `delete` removes.
-
-#### Change Master Password
-```bash
-apiman passwd
-```
-Prompts for a new master password, derives a new Argon2id key with fresh salt, re-encrypts the vault, and updates the active session daemon.
-
-#### Delete a Secret
-```bash
-apiman delete STRIPE_SECRET_KEY --project billing
+apiman export --format example --output .env.example    # keys only
+eval "$(apiman export --format shell --allow-view)"      # load into the current shell
 ```
 
-#### Session Management & Auto-Lock Timeout
-```bash
-apiman status   # Check daemon lock status, remaining timeout, and installation
-apiman unlock   # Start background session daemon
-apiman lock     # Lock vault and wipe master key from memory immediately
-```
+Exported files are written with mode `0600`.
 
-Configure how long the session stays unlocked (supports `s`/`m`/`h`/`d` suffixes, or `none` to disable auto-lock):
+## AI agents
+
+apiman lets coding agents (Claude Code, Codex, Gemini CLI, Cursor and others)
+use your keys without the key entering their context.
+
+### Auth proxy
+
+The proxy adds the real key to outgoing requests and forwards them only to the
+host configured for that key. The agent or app only sees a local base URL.
 
 ```bash
-apiman timeout          # Show current configured + active session timeout
-apiman timeout 30m      # Auto-lock after 30 minutes of inactivity
-apiman timeout 2h       # Auto-lock after 2 hours
-apiman timeout 900      # Auto-lock after 900 seconds
-apiman timeout none     # Always unlocked, never auto-lock
+apiman proxy add --preset openai          # route /openai to https://api.openai.com
+apiman proxy add stripe --secret STRIPE_KEY --upstream https://api.stripe.com
+apiman proxy start                        # listens on 127.0.0.1:8787
+apiman proxy env                          # base URLs to give to apps and agents
 ```
 
-Setting `none` (stored as `0`) keeps the master key in the daemon indefinitely until `apiman lock`.
-You can also edit `auto_lock_timeout_seconds` directly in `config.json` (`0` = always unlocked).
+```bash
+curl http://127.0.0.1:8787/openai/v1/models
+OPENAI_BASE_URL=http://127.0.0.1:8787/openai/v1 OPENAI_API_KEY=apiman-proxy python app.py
+```
 
-## Configuration
+Presets: `openai`, `anthropic`, `gemini`, `openrouter`, `groq`, `mistral`,
+`github`. Custom routes take `--header 'Name: Bearer {secret}'` and
+`--query 'key={secret}'`. Routes are stored inside the encrypted vault.
 
-Configuration is stored in `~/.config/apiman/config.json`:
+The proxy only listens on loopback, rejects browser requests and unexpected
+`Host` headers, does not follow redirects, masks the key if an upstream echoes
+it, and stops authenticating as soon as the vault is locked.
+
+### Agent mode
+
+By default agents see values like any other caller. To hide values from agents,
+set `agent_mode` in the config:
+
+| Value | Behaviour |
+| --- | --- |
+| `off` (default) | No special handling |
+| `auto` | Applies when an agent is detected (`CLAUDECODE`, `CODEX_*`, `GEMINI_CLI`, `CURSOR_AGENT`, `AI_AGENT`, `AGENT`) or `APIMAN_AGENT=1` |
+| `on` | Applies to every CLI call |
+
+In agent mode `get` and `export` print `[REDACTED:NAME]` instead of values,
+`copy` and route changes are refused, and `apiman run` still gives the program
+the real values but masks them in its output. This prevents accidental exposure
+in agent transcripts and logs. It is not a sandbox: a process running as your
+user can reach the session. For strict isolation, run the agent in a sandbox
+without access to `~/.config/apiman` and give it only the proxy URL.
+
+### Agent skill
+
+`docs/skills/SKILL.md` teaches agents how to use apiman safely. Install it into
+the shared skills folder used by most agents:
+
+```bash
+apiman skill --install ~/.agents/skills        # writes ~/.agents/skills/apiman/SKILL.md
+```
+
+Other locations:
+
+```bash
+apiman skill --install ~/.claude/skills        # Claude Code
+apiman skill --install ~/.codex/skills         # Codex
+apiman skill --install ~/.gemini/skills        # Gemini CLI
+apiman skill --install .agents/skills          # one project only
+```
+
+## Terminal UI
+
+Run `apiman` with no arguments. Values are masked until revealed.
+
+| Keys | Action |
+| --- | --- |
+| `Up` `Down` / `k` `j` | Move |
+| `PgUp` `PgDn` `Home` `End` (`g` `G`) | Jump |
+| `Left` `Right` / `h` `l` / `p` | Change project scope |
+| `/` or `Ctrl+F` | Search names, projects, tags and notes |
+| `Space` or `v` | Reveal or mask the entry (or the selection) |
+| `V`, `*` or `Shift+Space` | Reveal or mask everything visible |
+| `c` or `y` | Copy the value (clipboard is cleared after the timeout) |
+| `a` | Add |
+| `e` or `Enter` | Edit (bulk edit when entries are selected) |
+| `d` or `Delete` | Delete (the confirmation defaults to Cancel) |
+| `Shift+Up` `Shift+Down` / `K` `J` | Select a range |
+| `Tab` | Select or unselect one entry and move down |
+| `Esc` | Clear the selection, then the search, then the scope |
+| `i` / `X` | Import a `.env` file / export visible or selected entries |
+| `?` or `Ctrl+K` | Show all keybindings |
+| `L` | Lock the vault and quit |
+| `q` or `Ctrl+C` | Quit |
+
+In forms: `Tab` or `Up`/`Down` switch fields, `Ctrl+S` saves, `Ctrl+V` or
+`Ctrl+R` shows or hides the value, `Ctrl+W` deletes a word, `Ctrl+U` clears the
+field, `Esc` cancels. Pasting a secret never submits the form.
+
+The TUI picks up changes made by other apiman processes, locks itself after the
+auto-lock timeout, and uses no CPU while idle.
+
+### Custom keybindings and themes
+
+Any action can be remapped in `config.json`. Each action takes one key or a
+list. Run `apiman keys` to see all actions and check your configuration for
+typos and conflicts.
 
 ```json
 {
-  "vault_path": "~/.config/apiman/vault.enc",
-  "auto_lock_timeout_seconds": 900,
-  "default_project": "global",
-  "clipboard_timeout_seconds": 30
+  "theme": "ocean",
+  "keybindings": {
+    "copy": "y",
+    "lock": ["L", "ctrl+l"],
+    "add": "n"
+  }
 }
 ```
+
+Key syntax: a character (`a`, `V`, `?`), a named key (`enter`, `esc`, `tab`,
+`space`, `up`, `pageup`, `home`, `delete`, `f1`), optionally with `ctrl+`,
+`alt+` or `shift+`. `Ctrl+C` always quits.
+
+Themes: `ember` (default), `ocean`, `forest`, `mono`. `NO_COLOR` forces `mono`.
+
+## CLI reference
+
+| Command | Purpose |
+| --- | --- |
+| `init` | Create a vault |
+| `set NAME [VALUE]` | Add or update a secret (prompts, or reads all of stdin when piped) |
+| `get NAME` | Print a value (pipes only, unless `--allow-view`) |
+| `copy NAME` | Copy to the clipboard with auto-clear |
+| `list` | List entries without values (`--format json`) |
+| `delete NAME` | Delete an entry |
+| `run -- CMD` | Run a command with secrets injected |
+| `import FILE` | Import a `.env` file |
+| `export` | Export as `env`, `shell`, `example` or `refs` |
+| `proxy add/list/remove/env/start` | Manage the local auth proxy |
+| `passwd` | Change the master password |
+| `unlock`, `lock` | Start or stop the session |
+| `timeout [DURATION]` | Show or set auto-lock (`15m`, `2h`, `none`) |
+| `status` | Vault, session and agent mode status (`--format json`) |
+| `keys` | Show and validate TUI keybindings |
+| `skill` | Print or install the agent skill |
+| `completions SHELL` | Shell completion script |
+| `install`, `uninstall` | Manage the installed binary |
+
+Every command has examples in `apiman <command> --help`.
+
+Name lookup: with `--project P`, apiman looks in `P` and then in global.
+Without it, apiman uses the global entry or the single project that has the
+name, and asks for `--project` when several projects do. `delete --project P`
+only ever deletes from `P`.
+
+Scripts and CI can unlock with `APIMAN_MASTER_PASSWORD`. It is never passed on
+to programs started by `apiman run`.
+
+## Configuration
+
+`~/.config/apiman/config.json` is created on first use. Missing keys use their
+defaults; an invalid file is reported and never overwritten.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `vault_path` | `~/.config/apiman/apiman_vault.enc` | Encrypted vault file |
+| `auto_lock_timeout_seconds` | `900` | Idle time before the session locks (`0` = never) |
+| `default_project` | `global` | Scope for `set` and `import` without `--project` |
+| `clipboard_timeout_seconds` | `30` | Clipboard auto-clear delay (`0` = off) |
+| `agent_mode` | `off` | `off`, `auto` or `on` (see AI agents) |
+| `proxy_port` | `8787` | Port used by `apiman proxy` |
+| `theme` | `ember` | TUI theme |
+| `keybindings` | `{}` | TUI key overrides |
+
+Use `--config FILE` and `--vault FILE` to work with other files. Vaults created
+by older versions as `vault.enc` are renamed to `apiman_vault.enc` on first use.
+
+## Security
+
+- Key derivation: Argon2id (64 MiB, 3 passes, 4 lanes) with a random 32 byte
+  salt. Parameters are stored in the vault header.
+- Encryption: XChaCha20-Poly1305 with a random nonce on every save. The header
+  is authenticated, so any modified byte is detected.
+- Files: the vault and exports are written atomically with mode `0600`; the
+  config directory is created `0700`. Concurrent writers are serialized with a
+  lock, so the TUI and CLI never overwrite each other.
+- Memory: secrets are zeroed when dropped, core dumps are disabled, and the
+  daemon key is locked in RAM.
+- Session daemon: a Unix socket with mode `0600` that only answers the same
+  user. It runs detached from the terminal and uses no CPU while idle.
+- Master password: at least 8 characters.
+
+## Development
+
+```bash
+cargo build
+cargo clippy --all-targets
+cargo test
+```
+
+All tests are end to end: they run the real binary, or drive the TUI with key
+events, against real encrypted vaults in isolated temporary directories. See
+`AGENTS.md` for the code layout and conventions.
+
+## License
+
+MIT. See [LICENSE](LICENSE).
