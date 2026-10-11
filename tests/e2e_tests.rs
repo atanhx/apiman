@@ -682,6 +682,23 @@ fn test_tui_pin_interleaved_and_group_space() {
     handle_key(&mut app, shifted(KeyCode::Down));
     assert_eq!(app.marked.len(), 3);
 
+    // Plain navigation now commits (persists) instead of deselecting
+    handle_key(&mut app, press(KeyCode::Down));
+    assert_eq!(app.marked.len(), 3);
+    handle_key(&mut app, press(KeyCode::Up));
+    assert_eq!(app.marked.len(), 3);
+
+    // X exports exactly the marked entries, not the whole visible list
+    app.path_form.path.text = dir.path().join("pinned-export.env").to_string_lossy().to_string();
+    app.path_form.export_example = false;
+    app.run_export().unwrap();
+    let pinned_text =
+        std::fs::read_to_string(dir.path().join("pinned-export.env")).unwrap();
+    assert!(pinned_text.contains("K1="));
+    assert!(pinned_text.contains("K3="));
+    assert!(pinned_text.contains("K4="));
+    assert!(!pinned_text.contains("K2="));
+
     // Space in group mode reveals exactly the marked entries, then masks them again
     handle_key(&mut app, press(KeyCode::Char(' ')));
     assert_eq!(app.revealed_entries.len(), 3);
@@ -867,8 +884,12 @@ fn test_tui_multiselect_bulk_edit() {
     handle_key(&mut app, shifted(KeyCode::Up));
     assert_eq!(app.marked.len(), 2);
 
-    // Plain navigation exits group mode
+    // Plain navigation commits the shift-range into persistent pins (no silent deselect)
     handle_key(&mut app, press(KeyCode::Down));
+    assert!(app.in_group_mode());
+    assert_eq!(app.marked.len(), 2);
+    // Esc still clears everything
+    handle_key(&mut app, press(KeyCode::Esc));
     assert!(!app.in_group_mode());
 
     // Select all three again and open bulk edit with `e`

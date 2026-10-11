@@ -327,7 +327,7 @@ fn render_footer(frame: &mut Frame, app: &App, area: Rect) {
             ),
             Span::styled(" Reveal ", Style::default().fg(Color::White)),
             Span::styled(
-                "[*]",
+                "[V]",
                 Style::default()
                     .fg(ACCENT_ORANGE)
                     .add_modifier(Modifier::BOLD),
@@ -1016,7 +1016,11 @@ fn render_export_modal(frame: &mut Frame, app: &App) {
 
     let outer_block = Block::default()
         .title(Span::styled(
-            " Export Visible Secrets ",
+            if app.in_group_mode() {
+                format!(" Export {} Selected Secrets ", app.marked.len())
+            } else {
+                " Export Visible Secrets ".to_string()
+            },
             Style::default()
                 .fg(ACCENT_ORANGE)
                 .add_modifier(Modifier::BOLD),

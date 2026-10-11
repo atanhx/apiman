@@ -72,11 +72,11 @@ fn handle_normal_key(app: &mut App, key: KeyEvent) {
             app.move_selection(-10);
         }
         KeyCode::Home | KeyCode::Char('g') => {
-            app.clear_range();
+            app.commit_range();
             app.selected_index = 0;
         }
         KeyCode::End | KeyCode::Char('G') => {
-            app.clear_range();
+            app.commit_range();
             if !app.filtered_indices.is_empty() {
                 app.selected_index = app.filtered_indices.len() - 1;
             }

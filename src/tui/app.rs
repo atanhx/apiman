@@ -394,7 +394,7 @@ impl App {
         if self.filtered_indices.is_empty() {
             return;
         }
-        self.clear_range();
+        self.commit_range();
         let len = self.filtered_indices.len() as isize;
         let next = (self.selected_index as isize + delta).clamp(0, len - 1);
         self.selected_index = next as usize;
@@ -407,6 +407,17 @@ impl App {
     }
 
     pub fn clear_range(&mut self) {
+        self.selection_anchor = None;
+        self.refresh_marked();
+    }
+
+    /// Fold the active shift-range into persistent pins so plain navigation
+    /// never deselects entries out from under the user. Esc still clears all.
+    pub fn commit_range(&mut self) {
+        let current: Vec<usize> = self.marked.iter().copied().collect();
+        for i in current {
+            self.pinned.insert(i);
+        }
         self.selection_anchor = None;
         self.refresh_marked();
     }
@@ -696,9 +707,16 @@ impl App {
             self.path_form.export_example,
         );
 
+        let source: Vec<usize> = if !self.marked.is_empty() {
+            let mut v: Vec<usize> = self.marked.iter().copied().collect();
+            v.sort_unstable();
+            v
+        } else {
+            self.filtered_indices.clone()
+        };
+
         let output = if self.path_form.export_example {
-            let mut keys: Vec<String> = self
-                .filtered_indices
+            let mut keys: Vec<String> = source
                 .iter()
                 .filter_map(|&i| self.ctx.vault.entries.get(i))
                 .map(|e| e.name.clone())
@@ -707,8 +725,7 @@ impl App {
             keys.dedup();
             format_example(&keys)
         } else {
-            let mut entries: Vec<EnvEntry> = self
-                .filtered_indices
+            let mut entries: Vec<EnvEntry> = source
                 .iter()
                 .filter_map(|&i| self.ctx.vault.entries.get(i))
                 .map(|e| EnvEntry {
@@ -723,7 +740,11 @@ impl App {
         write_secret_file(&out_path, output.as_bytes())
             .map_err(|e| format!("Cannot write file: {e}"))?;
         self.active_modal = ActiveModal::None;
-        self.set_status(format!("Exported to '{}'", out_path.display()));
+        self.set_status(format!(
+            "Exported {} entries to '{}'",
+            source.len(),
+            out_path.display()
+        ));
         Ok(())
     }
 
