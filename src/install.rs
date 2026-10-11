@@ -15,82 +15,101 @@ pub fn installed_binary_path() -> PathBuf {
 }
 
 pub fn is_installed() -> bool {
-    let p = installed_binary_path();
-    p.exists() && p.is_file()
+    installed_binary_path().is_file()
 }
 
 pub fn is_dir_in_path(dir: &Path) -> bool {
-    if let Ok(path_var) = std::env::var("PATH") {
-        for entry in std::env::split_paths(&path_var) {
-            if normalize(&entry) == normalize(dir) {
-                return true;
-            }
-        }
-    }
-    false
+    let Ok(path_var) = std::env::var("PATH") else {
+        return false;
+    };
+    let want = canonical_or_self(dir);
+    std::env::split_paths(&path_var).any(|entry| canonical_or_self(&entry) == want)
 }
 
-fn normalize(p: &Path) -> String {
-    let s = p.to_string_lossy();
-    let trimmed = s.trim_end_matches('/');
-    if trimmed.is_empty() {
-        return "/".to_string();
-    }
-    trimmed.to_string()
+fn canonical_or_self(p: &Path) -> PathBuf {
+    fs::canonicalize(p).unwrap_or_else(|_| {
+        let s = p.to_string_lossy();
+        let trimmed = s.trim_end_matches('/');
+        PathBuf::from(if trimmed.is_empty() { "/" } else { trimmed })
+    })
 }
 
 pub fn resolve_install_dir(custom: Option<&Path>) -> Result<PathBuf, String> {
-    if let Some(dir) = custom {
-        let dir = expand_tilde(dir);
-        if dir.exists() && !dir.is_dir() {
-            return Err(format!(
-                "Install path '{}' exists and is not a directory.",
-                dir.display()
-            ));
-        }
-        return Ok(dir.to_path_buf());
+    let dir = match custom {
+        Some(d) => crate::config::expand_path(d),
+        None => default_install_dir(),
+    };
+    let dir = std::path::absolute(&dir)
+        .map_err(|e| format!("Invalid install path '{}': {e}", dir.display()))?;
+    if dir.exists() && !dir.is_dir() {
+        return Err(format!(
+            "Install path '{}' exists and is not a directory.",
+            dir.display()
+        ));
     }
-    Ok(default_install_dir())
+    Ok(dir)
 }
 
-pub fn install_binary_to(target_dir: &Path) -> Result<(PathBuf, bool), String> {
-    let current_exe = std::env::current_exe().map_err(|e| format!("Cannot locate current binary: {e}"))?;
+pub struct InstallOutcome {
+    pub path: PathBuf,
+    pub in_path: bool,
+    /// The running binary already is the installed one; nothing was copied.
+    pub already_current: bool,
+}
+
+fn same_file(a: &Path, b: &Path) -> bool {
+    match (fs::canonicalize(a), fs::canonicalize(b)) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => false,
+    }
+}
+
+pub fn install_binary_to(target_dir: &Path) -> Result<InstallOutcome, String> {
+    let current_exe =
+        std::env::current_exe().map_err(|e| format!("Cannot locate current binary: {e}"))?;
     let target_path = target_dir.join("apiman");
 
-    if !target_dir.exists() {
-        fs::create_dir_all(target_dir)
-            .map_err(|e| format!("Failed to create directory '{}': {e}", target_dir.display()))?;
-    }
-
-    // Force install: remove any existing binary first.
-    if target_path.exists() || target_path.is_symlink() {
-        fs::remove_file(&target_path)
-            .map_err(|e| format!("Failed to remove existing '{}': {e}", target_path.display()))?;
-    }
-
-    fs::copy(&current_exe, &target_path)
-        .map_err(|e| format!("Failed to copy binary to '{}': {e}", target_path.display()))?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let perms = fs::Permissions::from_mode(0o755);
-        let _ = fs::set_permissions(&target_path, perms);
-    }
+    fs::create_dir_all(target_dir)
+        .map_err(|e| format!("Failed to create directory '{}': {e}", target_dir.display()))?;
 
     let in_path = is_dir_in_path(target_dir);
-    Ok((target_path, in_path))
-}
+    if same_file(&current_exe, &target_path) {
+        return Ok(InstallOutcome {
+            path: target_path,
+            in_path,
+            already_current: true,
+        });
+    }
 
-pub fn install_binary() -> Result<(PathBuf, bool), String> {
-    install_binary_to(&default_install_dir())
+    // Copy next to the target and rename over it: atomic, never leaves a
+    // half-written binary, and works while the old binary is still running.
+    let staging = target_dir.join(format!(".apiman.install-{}", std::process::id()));
+    let result = (|| {
+        fs::copy(&current_exe, &staging)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&staging, fs::Permissions::from_mode(0o755))?;
+        }
+        fs::rename(&staging, &target_path)
+    })();
+    if let Err(e) = result {
+        let _ = fs::remove_file(&staging);
+        return Err(format!(
+            "Failed to install binary to '{}': {e}",
+            target_path.display()
+        ));
+    }
+
+    Ok(InstallOutcome {
+        path: target_path,
+        in_path,
+        already_current: false,
+    })
 }
 
 pub fn uninstall_binary(custom_dir: Option<&Path>) -> Result<PathBuf, String> {
-    let target_path = match custom_dir {
-        Some(dir) => expand_tilde(dir).join("apiman"),
-        None => installed_binary_path(),
-    };
+    let target_path = resolve_install_dir(custom_dir)?.join("apiman");
     if !target_path.exists() {
         return Err(format!(
             "apiman is not installed at '{}'",
@@ -102,14 +121,4 @@ pub fn uninstall_binary(custom_dir: Option<&Path>) -> Result<PathBuf, String> {
         .map_err(|e| format!("Failed to remove '{}': {e}", target_path.display()))?;
 
     Ok(target_path)
-}
-
-fn expand_tilde(p: &Path) -> PathBuf {
-    let s = p.to_string_lossy();
-    if let Some(rest) = s.strip_prefix("~/") {
-        if let Some(base) = BaseDirs::new() {
-            return base.home_dir().join(rest);
-        }
-    }
-    p.to_path_buf()
 }
