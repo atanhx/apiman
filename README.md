@@ -1,0 +1,132 @@
+# apiman
+
+Minimal, secure API credential and secret manager for Linux, macOS, and Windows.
+
+Features an interactive TUI (Ratatui), CLI commands, subprocess environment variable injection, terminal leak prevention, and an in-memory session daemon with auto-lock.
+
+## Features
+
+- **Security & Cryptography:** Argon2id key derivation + XChaCha20-Poly1305 authenticated encryption.
+- **In-Memory Hardening:** Sensitive strings wrapped with `zeroize` on drop, redacted debug output, memory page locking via `mlock`, and disabled core dumps via Linux `prctl`.
+- **Zero-Leak Runner:** `apiman run -- <command>` injects secrets directly into child process memory without writing to disk or shell history.
+- **Console Leak Prevention:** `apiman get <key>` prevents accidental printing to interactive terminals unless `--allow-view` is passed. Piping (`|`) works automatically.
+- **In-Memory Session Daemon:** Caches master key in RAM via an ephemeral local Unix socket with a configurable auto-lock inactivity timer.
+- **Interactive TUI:** Built with Ratatui; opens by default when running `apiman`.
+
+## Compilation & Installation
+
+Requires Rust (edition 2024 / 1.85+):
+
+```bash
+cargo build --release
+```
+
+The compiled binary will be located at `target/release/apiman`. You can copy it to your path:
+
+```bash
+cp target/release/apiman ~/.local/bin/
+```
+
+## Running Tests
+
+```bash
+cargo test
+```
+
+## Quick Start
+
+### 1. Launch TUI (Default Mode)
+
+Running `apiman` with no arguments launches the TUI. If no vault exists, it prompts to initialize one:
+
+```bash
+apiman
+```
+
+#### TUI Keybindings
+
+- `Ctrl+K` or `?`: Show keybindings help
+- `Ctrl+F` or `/`: Search and filter entries
+- `c`: Copy selected secret value to clipboard
+- `Space` or `v`: Toggle masked (`••••••••`) vs revealed secret value
+- `a`: Add new secret entry (interactive form modal)
+- `e`: Edit selected entry
+- `d` or `Delete`: Delete selected entry (with confirmation)
+- `p`: Cycle project filter (`all` -> `global` -> project names)
+- `j` / `k` or `Down` / `Up`: Navigate list
+- `l`: Lock vault and exit
+- `q`: Quit TUI
+
+### 2. CLI Usage
+
+#### Initialize Vault
+```bash
+apiman init
+```
+
+#### Store Secrets
+```bash
+# Global secret (prompted securely for value)
+apiman set OPENAI_API_KEY
+
+# Project-scoped secret with tags and description
+apiman set STRIPE_SECRET_KEY "sk_live_123" --project billing --tags payment,prod --description "Stripe production key"
+```
+
+#### Retrieve Secrets
+```bash
+# Direct terminal display (requires explicit --allow-view)
+apiman get OPENAI_API_KEY --allow-view
+
+# Pipe to another command or clipboard (raw value, no warning)
+apiman get OPENAI_API_KEY | pbcopy
+```
+
+#### List Secrets
+```bash
+# Table format (values are never displayed)
+apiman list
+
+# Filter by project or tag
+apiman list --project billing --tag prod
+
+# JSON output
+apiman list --format json
+```
+
+#### Run Applications Securely
+```bash
+# Injects global secrets into child process environment
+apiman run -- node server.js
+
+# Injects project-specific secrets (overriding globals on conflict)
+apiman run --project billing -- python main.py
+
+# Filter by tag
+apiman run --project billing --tag prod -- npm start
+```
+
+#### Delete a Secret
+```bash
+apiman delete STRIPE_SECRET_KEY --project billing
+```
+
+#### Session Management
+```bash
+apiman status   # Check daemon lock status and remaining timeout
+apiman unlock   # Start background session daemon
+apiman lock     # Lock vault and wipe master key from memory immediately
+```
+
+## Configuration
+
+Configuration is stored in `~/.config/apiman/config.json`:
+
+```json
+{
+  "vault_path": "~/.config/apiman/vault.enc",
+  "auto_lock_timeout_seconds": 900,
+  "default_project": "global",
+  "clipboard_timeout_seconds": 30
+}
+```
